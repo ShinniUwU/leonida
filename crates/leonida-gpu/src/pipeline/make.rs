@@ -60,8 +60,13 @@ impl Pending {
     }
 
     fn make(&self) {
-        self.made
-            .get_or_init(|| HostPipeline::new(&self.shaders, self.graphics.as_deref()));
+        self.made.get_or_init(|| {
+            if let Some(s) = self.shaders.iter().find(|s| super::skip_listed(&s.hash)) {
+                tracing::warn!(hash = %s.hash, "host pipeline not made: its shader is in LEONIDA_SKIP_PIPELINES");
+                return None;
+            }
+            HostPipeline::new(&self.shaders, self.graphics.as_deref())
+        });
         let (lock, done) = &DONE;
         let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
         done.notify_all();

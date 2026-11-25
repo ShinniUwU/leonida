@@ -493,7 +493,7 @@ pub(crate) fn making() -> u64 {
 static DROPS: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
 
 /// Shader hashes as printed in the pipeline diagnostics.
-#[cfg(all(windows, feature = "diagnostics"))]
+#[cfg(windows)]
 fn parse_skip_hashes(value: &str) -> Vec<String> {
     value
         .split(',')
@@ -513,19 +513,27 @@ fn parse_skip_hashes(value: &str) -> Vec<String> {
         .collect()
 }
 
+/// Whether `hash` is in `LEONIDA_SKIP_PIPELINES` (every build): pipelines
+/// with such a shader are never handed to the host driver, and their draws
+/// and dispatches are dropped. For a shader whose pipeline crashes a
+/// driver's compiler (an RX 9070 in `amdxc64.dll` on `0a12de46c4d5db08`).
+#[cfg(windows)]
+pub(crate) fn skip_listed(hash: &str) -> bool {
+    static HASHES: OnceLock<Vec<String>> = OnceLock::new();
+    HASHES
+        .get_or_init(|| {
+            let value = std::env::var("LEONIDA_SKIP_PIPELINES").unwrap_or_default();
+            parse_skip_hashes(&value)
+        })
+        .iter()
+        .any(|h| h == hash)
+}
+
 #[cfg(all(windows, feature = "diagnostics"))]
 fn skipped_shader(p: &Pipeline) -> Option<&str> {
-    static HASHES: OnceLock<Vec<String>> = OnceLock::new();
-    let hashes = HASHES.get_or_init(|| {
-        let value = std::env::var("LEONIDA_SKIP_PIPELINES").unwrap_or_default();
-        parse_skip_hashes(&value)
-    });
-    if hashes.is_empty() {
-        return None;
-    }
     p.shaders
         .iter()
-        .find(|shader| hashes.contains(&shader.hash))
+        .find(|shader| skip_listed(&shader.hash))
         .map(|shader| shader.hash.as_str())
 }
 
@@ -819,7 +827,7 @@ pub fn save_pipeline_cache() {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(all(windows, feature = "diagnostics"))]
+    #[cfg(windows)]
     #[test]
     fn skip_hashes_accepts_full_hashes_only() {
         assert!(super::parse_skip_hashes(" , ").is_empty());
