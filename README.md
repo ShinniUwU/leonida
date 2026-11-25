@@ -91,6 +91,9 @@ off by default). It asks for the game folder too, and whether to remember it:
 powershell -ExecutionPolicy Bypass -File .un-gta6.ps1
 ```
 
+`measure-gta6.ps1` does the same with the diagnostics build, the frame log and the card meter on, and saves
+everything the game prints to `%LOCALAPPDATA%\leonida\logs`.
+
 Saves, settings and `crashes.log` are kept in `%LOCALAPPDATA%\leonida\data`, derived data in
 `%LOCALAPPDATA%\leonida\cache`.
 
