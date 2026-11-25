@@ -38,7 +38,6 @@ The goal: a console-like experience on PC. The game starts straight into play, h
 | P-4 | While the camera moves, about half the time goes to frames of about 490 ms in which the card is idle for about 330 ms. The title's page-mapping copies (`CopyPageMappingsBatchX` to `xmem::map_alias`) cost 32 ms of every cutscene frame and 246 ms of a streaming frame. | `leonida-hle` | game |
 | P-5 | The title paces itself with `monitorx` / `mwaitx`, which only AMD processors have: about 280,000 emulated exceptions a second on an Intel processor. Find a cheaper way. | `leonida-loader` | game; an Intel CPU to measure |
 | P-6 | Translated shaders are too expensive: about 50 ms of a 97 ms frame are the title's own passes as translated. With every pass of the layer's gone, the first rooms would still be near 20 fps. | `leonida-shader` | game, GPU |
-| P-7 | The first run stutters while shaders translate and pipelines build. Warm the cache before play (`leonida translate --warm`), with progress shown, so the first session starts smooth. | `apps/leonida`, `run-gta6.ps1` | game |
 | P-8 | About 24 GB of memory is in use during play. | all | game |
 | P-9 | A 12 GB card is full from the first world frame (9.2 of a 10.3 GB budget), and thousands of textures are dropped and made again. Levels on demand (`LEONIDA_LEVELS_ON_DEMAND=1`) saved 3.1 GB in one run; test it more and make it the default if it holds. | `leonida-gpu` | game, GPU |
 

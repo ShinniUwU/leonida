@@ -49,6 +49,18 @@ pub fn warm_shader(container: &[u8]) -> Result<bool, String> {
     }
 }
 
+/// See `leonida_gpu::probe_translation_host`.
+pub fn probe_translation_host() -> bool {
+    #[cfg(windows)]
+    {
+        leonida_gpu::probe_translation_host()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 /// Keeps the host's translations of the title's shaders in `dir` (a
 /// folder of the cache) across runs, and its compiled pipelines beside it
 /// (`pipelines`).

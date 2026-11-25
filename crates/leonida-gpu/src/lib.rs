@@ -76,6 +76,16 @@ mod watch;
 
 #[cfg(windows)]
 pub use host::on_failure;
+
+/// Makes the host device and hands the translator the facts the shader cache
+/// keys on (widest wave, view heap limit), as a run does before its first
+/// shader. The offline warm-up calls it so its translations land under the
+/// run's key. False: there is no host device.
+#[cfg(windows)]
+pub fn probe_translation_host() -> bool {
+    descriptor::host::probe_view_limit();
+    host::host().is_some()
+}
 #[cfg(windows)]
 pub use inplace::{title_memory_freeing, title_memory_section, title_memory_view};
 #[cfg(windows)]

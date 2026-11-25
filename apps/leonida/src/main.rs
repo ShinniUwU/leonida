@@ -168,6 +168,11 @@ fn main() -> Result<()> {
             jobs,
             warm,
         } => {
+            // The warm-up keys its translations on the same host facts a run
+            // gets from the device; the switches below still override them.
+            if warm.is_some() && !leonida_hle::modules::d3d12x::probe_translation_host() {
+                eprintln!("no host D3D12 device: the warm-up's shaders may not match a run's cache");
+            }
             // `LEONIDA_VIEW_LIMIT=<null slot>`: translate as on a host whose view heap is capped
             if let Some(n) = std::env::var("LEONIDA_VIEW_LIMIT").ok().and_then(|v| v.parse().ok()) {
                 leonida_shader::emit::set_view_heap_limit(n);

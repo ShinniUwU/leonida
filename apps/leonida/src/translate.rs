@@ -177,7 +177,9 @@ pub fn warm(paths: Vec<PathBuf>, file: &Path, jobs: Option<usize>) -> Result<()>
     let cfg = leonida_core::Config::load()?;
     leonida_hle::modules::d3d12x::use_shader_cache(cfg.cache_subdir("shaders")?);
     let paths = crate::default_paths(paths)?;
-    let threads = jobs.unwrap_or(4).max(1);
+    let threads = jobs
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()))
+        .max(1);
     let began = std::time::Instant::now();
     let done = Mutex::new(HashSet::new());
     let counts = [const { AtomicUsize::new(0) }; 5];
@@ -269,6 +271,8 @@ pub fn run(
         jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));
     let seen = Mutex::new(HashSet::new());
     let total = Mutex::new(Tally::default());
+    let began = std::time::Instant::now();
+    let done = AtomicUsize::new(0);
     for root in &paths {
         for entry in walkdir::WalkDir::new(root)
             .into_iter()
@@ -300,6 +304,10 @@ pub fn run(
                         };
                         while let Some(job) = jobs.get(next.fetch_add(1, Ordering::Relaxed)) {
                             translate(job, entry.path(), &seen, &mut t, &mut checks);
+                            let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                            if n.is_multiple_of(1000) {
+                                println!("translate    {n} containers so far, {:.0} s", began.elapsed().as_secs_f64());
+                            }
                         }
                         lock(&total).merge(t);
                     });

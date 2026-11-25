@@ -7,9 +7,13 @@
 #
 #   powershell -ExecutionPolicy Bypass -File .\measure-gta6.ps1
 #   powershell -ExecutionPolicy Bypass -File .\measure-gta6.ps1 -GameDir 'D:\Games\GTA VI'   # this run only
+#   powershell -ExecutionPolicy Bypass -File .\measure-gta6.ps1 -WarmUp yes   # warm up the shader cache without asking
 
 param(
-    [string]$GameDir = ''
+    [string]$GameDir = '',
+    # yes: warm up the shader cache before starting, no: skip it, ask: ask (default).
+    [ValidateSet('ask', 'yes', 'no')]
+    [string]$WarmUp = 'ask'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -65,6 +69,23 @@ try {
     $env:LEONIDA_FRAME_LOG = '1'
     $env:LEONIDA_CARD_METER = '1'
     $env:LEONIDA_CARD_METER_PIPELINES = '1'
+
+    # Shaders not in the cache are translated the first time the game uses them, mid-play.
+    if ($WarmUp -eq 'ask') {
+        Write-Host ''
+        Write-Host 'Warm up the shader cache first? It translates every shader before the game starts:'
+        Write-Host 'about 1 to 2 minutes the first time (and after an update), about 30 s when the cache is full.'
+        Write-Host 'WARNING: without it, the game translates shaders while you play, so it stutters and runs'
+        Write-Host 'slower until the cache fills up.'
+        $answer = Read-Host 'Warm up now? [Y/n]'
+        $WarmUp = if ($answer.Trim() -match '^(y|yes)?$') { 'yes' } else { 'no' }
+    }
+    if ($WarmUp -eq 'yes') {
+        & $exe translate --warm all
+        if ($LASTEXITCODE -ne 0) { Write-Warning "the warm-up failed (exit $LASTEXITCODE); starting anyway" }
+    } else {
+        Write-Warning 'starting without a warm-up: expect stutter until the shader cache fills up'
+    }
 
     $logDir = Join-Path $env:LOCALAPPDATA 'leonida\logs'
     New-Item -ItemType Directory -Force $logDir | Out-Null
