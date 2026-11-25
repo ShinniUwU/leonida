@@ -94,6 +94,12 @@ powershell -ExecutionPolicy Bypass -File .\run-gta6.ps1
 `measure-gta6.ps1` does the same with the diagnostics build, the frame log and the card meter on, and saves
 everything the game prints to `%LOCALAPPDATA%\leonida\logs`.
 
+`shot-run.ps1` runs the game unattended and takes frame shots (`-ShotAt`, with `-Keys` to get through the menus) into
+`%LOCALAPPDATA%\leonida\shots`. Shots come from your game: keep them on your PC.
+
+If the GPU driver crashes while building one shader's pipeline, `LEONIDA_SKIP_PIPELINES=<16-digit shader hash>` keeps
+that pipeline from ever reaching the driver (its draws are dropped).
+
 Saves, settings and `crashes.log` are kept in `%LOCALAPPDATA%\leonida\data`, derived data in
 `%LOCALAPPDATA%\leonida\cache`.
 
