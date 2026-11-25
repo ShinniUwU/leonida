@@ -76,3 +76,6 @@
 *.swp
 Thumbs.db
 .DS_Store
+
+# A TypeScript sample shipped with the systematic-debugging skill; .ts is not on the policy allowlist.
+/.claude/skills/systematic-debugging/condition-based-waiting-example.ts
