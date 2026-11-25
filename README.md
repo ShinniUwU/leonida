@@ -88,7 +88,7 @@ settings.
 off by default). It asks for the game folder too, and whether to remember it:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .un-gta6.ps1
+powershell -ExecutionPolicy Bypass -File .\run-gta6.ps1
 ```
 
 `measure-gta6.ps1` does the same with the diagnostics build, the frame log and the card meter on, and saves

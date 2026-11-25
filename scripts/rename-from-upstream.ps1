@@ -33,6 +33,9 @@ $protectAll = @(
 )
 $protectReadme = @('VIctory(?![A-Za-z])')
 
+# This fork's own files, which name upstream on purpose.
+$keepAsIs = @('CLAUDE.md', 'TODO.md')
+
 function Convert-Name([string]$text, [string[]]$protect) {
     $saved = New-Object System.Collections.Generic.List[string]
     foreach ($p in $protect) {
@@ -57,6 +60,7 @@ foreach ($rel in $tracked + $Also) {
     $path = Join-Path $Root $rel
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
     if ((Resolve-Path -LiteralPath $path).Path -eq $self) { continue }
+    if ($keepAsIs -contains $rel) { continue }
     $bytes = [System.IO.File]::ReadAllBytes($path)
     if ([Array]::IndexOf($bytes, [byte]0) -ge 0) { continue }
     try { $text = $strict.GetString($bytes) } catch { Write-Host "not UTF-8, left alone: $rel"; continue }
