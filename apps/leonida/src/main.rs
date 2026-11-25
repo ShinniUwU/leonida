@@ -9,7 +9,7 @@ mod run;
 mod shader;
 mod translate;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -116,7 +116,11 @@ enum Command {
         title_args: Vec<String>,
     },
     /// Show the resolved configuration and check it.
-    Config,
+    Config {
+        /// First save this folder as the game folder in leonida.toml.
+        #[arg(long)]
+        game_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -191,7 +195,14 @@ fn main() -> Result<()> {
             };
             run::run(&exe, unimplemented, strict, execute, console)
         }
-        Command::Config => show_config(),
+        Command::Config { game_dir } => {
+            if let Some(dir) = game_dir {
+                check_game_dir(&dir)?;
+                let saved = leonida_core::Config::save_game_dir(&dir)?;
+                println!("game folder saved to {}", saved.display());
+            }
+            show_config()
+        }
     }
 }
 
@@ -233,18 +244,26 @@ fn ask_game_dir() -> Result<PathBuf> {
         if dir.as_os_str().is_empty() {
             continue;
         }
-        if !dir.join("MicrosoftGame.config").is_file() {
-            println!("no MicrosoftGame.config in {}, try again:", dir.display());
-            continue;
-        }
-        if let Err(e) = leonida_core::ensure_outside_repo(&dir) {
-            println!("{e}");
+        if let Err(e) = check_game_dir(&dir) {
+            println!("{e:#}, try again:");
             continue;
         }
         let saved = leonida_core::Config::save_game_dir(&dir)?;
         println!("game folder saved to {}", saved.display());
         return Ok(dir);
     }
+}
+
+/// A game folder holds the title's MicrosoftGame.config and lies outside
+/// the repository.
+fn check_game_dir(dir: &Path) -> Result<()> {
+    anyhow::ensure!(
+        dir.join("MicrosoftGame.config").is_file(),
+        "no MicrosoftGame.config in {}",
+        dir.display()
+    );
+    leonida_core::ensure_outside_repo(dir)?;
+    Ok(())
 }
 
 /// The `Name` of the manifest's first `<Executable>` element (not

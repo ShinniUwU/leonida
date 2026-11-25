@@ -84,6 +84,13 @@ The first run asks for the folder of your copy of the game (the one with `Micros
 `leonida.toml`, which git ignores. `leonida config` shows what is set, and `leonida.example.toml` lists the other
 settings.
 
+`run-gta6.ps1` does the build and the run in one step, with the frame-rate switches that measured faster (they are
+off by default). It asks for the game folder too, and whether to remember it:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .un-gta6.ps1
+```
+
 Saves, settings and `crashes.log` are kept in `%LOCALAPPDATA%\leonida\data`, derived data in
 `%LOCALAPPDATA%\leonida\cache`.
 
