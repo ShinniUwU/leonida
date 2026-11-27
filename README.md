@@ -304,6 +304,12 @@ Input: XInput pads. With none connected, the keyboard acts as a pad while the ga
 | F / H | stick clicks |
 | Esc, Tab | Menu, View |
 
+`LEONIDA_KBM_GTA=1` (off by default) maps the keyboard and mouse like GTA V on PC instead: `F2` or `` ` ``
+(`~`) turns mouse-look on and hides the cursor (`Esc`, `P` or leaving the window turns it off), left / right mouse
+button = RT / LT, middle button or `C` = R3, `Shift` = A, `Space` = X, `R` = B, `F` = Y, `Tab` = LB, `Q` = RB,
+`Ctrl` = L3, `E` = D-pad right, `V` = View. `LEONIDA_MOUSE_SENS` sets the mouse speed (`1.0`),
+`LEONIDA_MOUSE_INVERT_Y=1` inverts it. From Belobug/VIctory-Belobug-AMD (pull request #295 by zhu1025960209-web).
+
 ### Testing the optional one-record clamp
 
 An experimental optimization reduces GPU work before individual indirect draws. It improved a synthetic
