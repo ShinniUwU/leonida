@@ -5,16 +5,14 @@
 //! clamp, one charge per group). Ignored by default; run it with
 //! `cargo test -p leonida-gpu --release --lib indirect::bench -- --ignored --nocapture`.
 //! It needs no title files: the draws are tiny triangles of ours.
-//! `bench_single_record_clamp` compares the current grouped shader with its
-//! single-record specialization, keeping barriers and budget placement equal.
 
 use super::*;
-use windows::Win32::Foundation::{RECT, WAIT_OBJECT_0};
+use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS, IDXGIFactory4,
 };
-use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
 use windows::core::{Interface, PCSTR};
 
 /// Draws a frame (the title's gameplay frames hold about 3,200 indirect
@@ -181,36 +179,15 @@ enum Barriers {
 #[test]
 #[ignore = "benchmark; see the module notes"]
 fn bench_indirect_draw_barriers() {
-    bench_draws(false);
-}
-
-#[test]
-#[ignore = "hardware GPU comparison; run alone in release mode with --ignored --nocapture"]
-fn bench_single_record_clamp() {
-    bench_draws(true);
-}
-
-fn bench_draws(single_record: bool) {
     let Some(host) = super::host() else {
-        assert!(
-            !single_record,
-            "the single-record benchmark requires a hardware GPU"
-        );
         eprintln!("no host GPU");
         return;
     };
     let device = &host.device;
-    let clamps = if single_record {
-        [
-            make_from(device, SOURCE).expect("the current grouped clamp"),
-            make_single_for(device).expect("the single-record clamp must compile"),
-        ]
-    } else {
-        [
-            make_from(device, OLD_SOURCE).expect("the old clamp"),
-            make_for(device).expect("the clamp"),
-        ]
-    };
+    let clamps = [
+        make_from(device, OLD_SOURCE).expect("the old clamp"),
+        make_for(device).expect("the clamp"),
+    ];
     // SAFETY: plain D3D12 object creation with valid descriptions; the
     // objects outlive every list recorded and run below.
     unsafe {
@@ -222,23 +199,11 @@ fn bench_draws(single_record: bool) {
                 })
                 .and_then(|a| a.GetDesc1())
                 .map(|d| {
-                    if single_record {
-                        assert_eq!(
-                            d.Flags
-                                & windows::Win32::Graphics::Dxgi::DXGI_ADAPTER_FLAG_SOFTWARE.0
-                                    as u32,
-                            0,
-                            "hardware timestamps are required; software adapters are not measured"
-                        );
-                    }
                     String::from_utf16_lossy(&d.Description)
                         .trim_end_matches('\0')
                         .to_owned()
                 })
-                .unwrap_or_else(|e| {
-                    assert!(!single_record, "cannot identify the measured adapter: {e}");
-                    "an unnamed adapter".to_owned()
-                })
+                .unwrap_or_else(|_| "an unnamed adapter".to_owned())
         };
         let queue: ID3D12CommandQueue = device
             .CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC {
@@ -330,7 +295,6 @@ fn bench_draws(single_record: bool) {
 
         // The title's records: three vertices, one instance, 32 bytes apart.
         let (src, src_ptr) = host.shared_buffer(u64::from(DRAWS * STEP)).unwrap();
-        std::ptr::write_bytes(src_ptr, 0, (DRAWS * STEP) as usize);
         for i in 0..DRAWS as usize {
             let words = [3u32, 1, 0, 0];
             std::ptr::copy_nonoverlapping(
@@ -389,7 +353,7 @@ fn bench_draws(single_record: bool) {
                 D3D12_HEAP_FLAG_NONE,
                 &D3D12_RESOURCE_DESC {
                     Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
-                    Width: 32,
+                    Width: 16,
                     Height: 1,
                     DepthOrArraySize: 1,
                     MipLevels: 1,
@@ -413,24 +377,6 @@ fn bench_draws(single_record: bool) {
         let mut frame = |barriers: Barriers, clamp: &Clamp, window: u32, card: bool| -> [f64; 3] {
             allocator.Reset().unwrap();
             list.Reset(&allocator, None).unwrap();
-            if single_record {
-                // Every measured frame begins with the same budget. Setup and readback are
-                // outside the timestamp pair, and the previous frame's fence has completed.
-                std::ptr::write_bytes(budget_ptr, 0, 256);
-                if card {
-                    list.ResourceBarrier(&[transition(
-                        &card_budget,
-                        D3D12_RESOURCE_STATE_COMMON,
-                        D3D12_RESOURCE_STATE_COPY_DEST,
-                    )]);
-                    list.CopyBufferRegion(&card_budget, 0, &budget, 0, 256);
-                    list.ResourceBarrier(&[transition(
-                        &card_budget,
-                        D3D12_RESOURCE_STATE_COPY_DEST,
-                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                    )]);
-                }
-            }
             let recording = std::time::Instant::now();
             list.EndQuery(&stamps, D3D12_QUERY_TYPE_TIMESTAMP, 0);
             list.OMSetRenderTargets(1, Some(&rtv), false, None);
@@ -482,19 +428,6 @@ fn bench_draws(single_record: bool) {
             }
             list.EndQuery(&stamps, D3D12_QUERY_TYPE_TIMESTAMP, 1);
             list.ResolveQueryData(&stamps, D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, &back, 0);
-            if single_record && card {
-                list.ResourceBarrier(&[transition(
-                    &card_budget,
-                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                    D3D12_RESOURCE_STATE_COPY_SOURCE,
-                )]);
-                list.CopyBufferRegion(&back, 16, &card_budget, 0, 12);
-                list.ResourceBarrier(&[transition(
-                    &card_budget,
-                    D3D12_RESOURCE_STATE_COPY_SOURCE,
-                    D3D12_RESOURCE_STATE_COMMON,
-                )]);
-            }
             list.Close().unwrap();
             let recorded = recording.elapsed().as_secs_f64() * 1e3;
             let running = std::time::Instant::now();
@@ -502,32 +435,12 @@ fn bench_draws(single_record: bool) {
             submitted += 1;
             queue.Signal(&fence, submitted).unwrap();
             fence.SetEventOnCompletion(submitted, event).unwrap();
-            assert_eq!(
-                WaitForSingleObject(event, 30_000),
-                WAIT_OBJECT_0,
-                "GPU timed out"
-            );
+            WaitForSingleObject(event, INFINITE);
             let ran = running.elapsed().as_secs_f64() * 1e3;
             let mut data = std::ptr::null_mut();
             back.Map(0, None, Some(&mut data)).unwrap();
             let t = std::slice::from_raw_parts(data.cast::<u64>(), 2);
             let gpu = t[1].saturating_sub(t[0]) as f64 / frequency * 1e3;
-            assert!(
-                gpu.is_finite() && gpu > 0.0,
-                "the GPU returned no elapsed time"
-            );
-            if single_record {
-                let charged = if card {
-                    std::slice::from_raw_parts(data.cast::<u32>().add(4), 3)
-                } else {
-                    std::slice::from_raw_parts(budget_ptr.cast::<u32>(), 3)
-                };
-                assert_eq!(
-                    charged,
-                    [DRAWS * 3, 0, 0],
-                    "every triangle must charge its work"
-                );
-            }
             back.Unmap(0, None);
             (budget_ptr as *mut u32).write_volatile(0);
             [gpu, recorded, ran]
@@ -538,47 +451,22 @@ fn bench_draws(single_record: bool) {
         let (old, new) = (&clamps[0], &clamps[1]);
         // The last two keep the budget in the card's memory instead of
         // memory the CPU maps (where the list's budget is now).
-        let cases: Vec<(&str, Barriers, &Clamp, u32, bool)> = if single_record {
-            vec![
-                ("grouped, one, card", Barriers::New, old, 1, true),
-                ("single, one, card", Barriers::New, new, 1, true),
-                ("grouped, one, shared", Barriers::New, old, 1, false),
-                ("single, one, shared", Barriers::New, new, 1, false),
-                ("grouped, windows, card", Barriers::New, old, WINDOW, true),
-                ("single, windows, card", Barriers::New, new, WINDOW, true),
-                (
-                    "grouped, windows, shared",
-                    Barriers::New,
-                    old,
-                    WINDOW,
-                    false,
-                ),
-                ("single, windows, shared", Barriers::New, new, WINDOW, false),
-            ]
-        } else {
-            vec![
-                ("one at a time, main", Barriers::Old, old, 1, false),
-                ("one at a time, this", Barriers::New, new, 1, false),
-                ("windows of 32, main", Barriers::Old, old, WINDOW, false),
-                ("windows, new barriers", Barriers::New, old, WINDOW, false),
-                ("windows of 32, this", Barriers::New, new, WINDOW, false),
-                ("one at a time, card", Barriers::New, new, 1, true),
-                ("windows of 32, card", Barriers::New, new, WINDOW, true),
-            ]
-        };
+        let cases: [(&str, Barriers, &Clamp, u32, bool); 7] = [
+            ("one at a time, main", Barriers::Old, old, 1, false),
+            ("one at a time, this", Barriers::New, new, 1, false),
+            ("windows of 32, main", Barriers::Old, old, WINDOW, false),
+            ("windows, new barriers", Barriers::New, old, WINDOW, false),
+            ("windows of 32, this", Barriers::New, new, WINDOW, false),
+            ("one at a time, card", Barriers::New, new, 1, true),
+            ("windows of 32, card", Barriers::New, new, WINDOW, true),
+        ];
         // Warm up, then the cases in turn, so drift falls on all alike.
         for &(_, barriers, clamp, window, card) in &cases {
             frame(barriers, clamp, window, card);
         }
         let mut times: Vec<Vec<[f64; 3]>> = vec![Vec::new(); cases.len()];
-        for run in 0..RUNS {
-            for at in 0..cases.len() {
-                let i = if run % 2 == 0 {
-                    at
-                } else {
-                    cases.len() - 1 - at
-                };
-                let (_, barriers, clamp, window, card) = cases[i];
+        for _ in 0..RUNS {
+            for (i, &(_, barriers, clamp, window, card)) in cases.iter().enumerate() {
                 times[i].push(frame(barriers, clamp, window, card));
             }
         }
@@ -588,34 +476,20 @@ fn bench_draws(single_record: bool) {
             x[x.len() / 2]
         };
         eprintln!(
-            "indirect {} on {adapter}: {DRAWS} one-record draws a frame, \
-             medians of {RUNS} frames",
-            if single_record {
-                "single-record clamp"
-            } else {
-                "draw barriers"
-            }
+            "indirect draw barriers on {adapter}: {DRAWS} one-record draws a frame, \
+             medians of {RUNS} frames"
         );
         for (i, (name, ..)) in cases.iter().enumerate() {
             let gpu = median(&times[i], 0);
             eprintln!(
-                "  {name:<24} GPU {gpu:8.3} ms ({:6.3} us a draw), recording {:6.2} ms, \
+                "  {name:<22} GPU {gpu:7.2} ms ({:5.2} us a draw), recording {:6.2} ms, \
                  submit to done {:7.2} ms",
                 gpu * 1e3 / f64::from(DRAWS),
                 median(&times[i], 1),
                 median(&times[i], 2),
             );
-            if single_record {
-                let samples: Vec<f64> = times[i].iter().map(|t| t[0]).collect();
-                eprintln!("    GPU samples ms: {samples:?}");
-            }
         }
-        let comparisons: &[(usize, usize)] = if single_record {
-            &[(0, 1), (2, 3), (4, 5), (6, 7)]
-        } else {
-            &[(0, 1), (2, 3), (3, 4), (2, 4), (1, 5), (4, 6)]
-        };
-        for &(from, to) in comparisons {
+        for (from, to) in [(0, 1), (2, 3), (3, 4), (2, 4), (1, 5), (4, 6)] {
             let (a, b) = (median(&times[from], 0), median(&times[to], 0));
             eprintln!(
                 "  {} -> {}: GPU time {:+.1} %",

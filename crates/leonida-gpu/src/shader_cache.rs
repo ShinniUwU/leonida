@@ -1,19 +1,17 @@
 //! Translated shaders kept on disk (decision 0003): under the configured
 //! cache folder, keyed by the container's content and by the translator
-//! that translated it (its source fingerprint and settings, see `build`), so
-//! a changed translator never serves an old translation. Entries go through
+//! (the BLAKE3 of its sources) and its settings, so a changed translator
+//! never serves an old translation. Entries go through
 //! `leonida-pipeline`'s content-addressed cache, which writes them
 //! atomically; an entry that does not read back is translated again.
-//! A new translation is returned directly, even if its entry cannot be
-//! saved. A cache write failure warns once; it does not discard the shader.
 //!
 //! The entry is our own encoding of [`HostShader`]: a field added to it
 //! must be added to `encode` and `decode` too (entries of older builds
 //! are ignored anyway).
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
 
 use leonida_pipeline::{Cache, Converter};
 use leonida_shader::emit::{HostShader, StaticSampler, UserData};
@@ -39,59 +37,91 @@ pub(crate) fn counts() -> (u64, u64) {
     (HITS.load(Ordering::Relaxed), MISSES.load(Ordering::Relaxed))
 }
 
-/// What identifies the translation, besides the container: the shader
-/// crate's fingerprint (its source, every switch it reads, the host facts the
-/// device gave it, the loop limit, barrier waits and clean-up passes) and
-/// this file's encoding of the result. Not the whole executable any more: a
-/// rebuild that leaves the translator alone keeps its translations (each new
-/// build used to translate the title's thousands of shaders again, which kept
-/// the first minutes of every test run short of pipelines).
-/// `LEONIDA_SHADER_CACHE_KEY=exe` restores the old key (the executable's hash).
-/// Worked out per lookup, so a translation made before the device said its
-/// wave size is never filed under the later key.
+/// What identifies a translation beside its container: the translator
+/// (the BLAKE3 of its sources, `build.rs`), the settings it runs with, and
+/// what it was told of the host. Not our executable: a rebuild of anything
+/// else used to translate every shader again.
 fn build() -> [u8; 32] {
-    static WARNED: std::sync::Once = std::sync::Once::new();
-    let limit = leonida_shader::emit::loop_limit();
-    if limit != leonida_shader::emit::DEFAULT_LOOP_LIMIT {
-        WARNED.call_once(|| tracing::warn!(limit, "LEONIDA_SHADER_LOOP_LIMIT: translated loops stop sooner"));
-    }
-    static EXE: OnceLock<Option<[u8; 32]>> = OnceLock::new();
-    let exe = EXE.get_or_init(|| {
-        if std::env::var_os("LEONIDA_SHADER_CACHE_KEY").is_some_and(|v| v == "exe") {
-            match std::env::current_exe().and_then(std::fs::read) {
-                Ok(bytes) => Some(*blake3::hash(&bytes).as_bytes()),
-                Err(e) => {
-                    tracing::warn!(error = %e, "cannot read our executable; keying on the translator");
-                    None
-                }
-            }
-        } else {
-            None
+    // The view heap's null slot differs by host GPU: a translation cached
+    // without the clamp must not be served (`host_settings` below).
+    crate::descriptor::host::probe_view_limit();
+    static FIXED: OnceLock<Vec<u8>> = OnceLock::new();
+    let fixed = FIXED.get_or_init(|| {
+        let limit = leonida_shader::emit::loop_limit();
+        if limit != leonida_shader::emit::DEFAULT_LOOP_LIMIT {
+            tracing::warn!(
+                limit,
+                "LEONIDA_SHADER_LOOP_LIMIT: translated loops stop sooner"
+            );
         }
+        let mut bytes = env!("LEONIDA_TRANSLATOR").as_bytes().to_vec();
+        bytes.extend_from_slice(&limit.to_le_bytes());
+        // Which group barriers wait is part of the translation too.
+        bytes.push(leonida_shader::emit::group_sync());
+        // So are the switches that pick the form of a wave64 program:
+        // without them here a run with `LEONIDA_WAVE_WIDE=0` was
+        // served the translations an earlier run of the same
+        // executable had cached with the switch unset.
+        for name in [
+            "LEONIDA_WAVE_WIDE",
+            "LEONIDA_WAVE_DEEP_SKIPS",
+            "LEONIDA_WAVE_OWN_BITS",
+            "LEONIDA_WAVE_LOCAL",
+            "LEONIDA_F16_NEAREST",
+            "LEONIDA_FILTER_3D",
+            "LEONIDA_HELPER_OWN",
+            "LEONIDA_FIRSTLANE_OWN",
+            "LEONIDA_FIRST_HALF",
+            "LEONIDA_STRICT_JOINS",
+            "LEONIDA_MESH_OUTPUT_STRICT",
+            "LEONIDA_BVH_FENCES",
+            "LEONIDA_BVH_BOUNDS",
+            "LEONIDA_THREAD_TICKET",
+        ] {
+            bytes.extend_from_slice(name.as_bytes());
+            bytes.push(b'=');
+            if let Some(value) = std::env::var_os(name) {
+                bytes.extend_from_slice(value.as_encoded_bytes());
+            }
+            bytes.push(0);
+        }
+        // So is whether pixel programs keep the console's early depth test
+        // (`LEONIDA_EARLY_DEPTH=1`): only while it is on, so that the
+        // translations cached without it are still served without it.
+        if leonida_shader::emit::early_depth() {
+            tracing::info!(
+                "LEONIDA_EARLY_DEPTH=1: pixel programs whose console code tests depth before them get the host's early depth-stencil test"
+            );
+            bytes.extend_from_slice(b"LEONIDA_EARLY_DEPTH=1");
+            bytes.push(0);
+        }
+        // And which clean-up passes ran over the translated code.
+        bytes.extend_from_slice(&leonida_shader::emit::shader_opt().to_le_bytes());
+        bytes
     });
-    let mut h = blake3::Hasher::new();
-    h.update(b"leonida shader cache key 2\0");
-    if let Some(exe) = exe {
-        h.update(exe);
+    let mut hash = blake3::Hasher::new();
+    hash.update(fixed);
+    for value in leonida_shader::emit::host_settings() {
+        hash.update(&value.to_le_bytes());
     }
-    h.update(&leonida_shader::emit::translation_fingerprint());
-    h.update(include_bytes!("shader_cache.rs"));
-    *h.finalize().as_bytes()
+    *hash.finalize().as_bytes()
 }
 
-/// The offline warm-up (`leonida translate --warm`): `container` is
-/// translated into the cache unless it is there already. `Ok(true)`: it
-/// was translated now, but a cache write failure can leave it unsaved
-/// (with a warning). Needs [`use_shader_cache`] and the same host facts
-/// the run will have (`leonida_shader::emit::translation_fingerprint`).
-pub fn warm(container: &[u8]) -> Result<bool, String> {
-    let cache = CACHE.get().ok_or("no shader cache")?;
-    let ran = AtomicBool::new(false);
-    let translate = |c: &[u8]| {
-        ran.store(true, Ordering::Relaxed);
-        leonida_shader::emit::translate(c).map_err(|e| e.to_string())
-    };
-    cached(cache, &build(), container, translate).map(|_| ran.load(Ordering::Relaxed))
+/// What tells one set of translations from another ([`build`]).
+pub(crate) fn translation() -> [u8; 32] {
+    build()
+}
+
+/// Puts the translation of `container` into the cache before any title asks
+/// for it (`leonida shaders`): whether it was there already, or why it does
+/// not translate. The host is opened first, as a run does: what the card
+/// can do decides the form of some programs.
+pub fn precompile(container: &[u8]) -> Result<bool, String> {
+    let _ = crate::host::host();
+    let misses = MISSES.load(Ordering::Relaxed);
+    host_shader(container)?;
+    // (Counts other threads' misses too: the caller only adds them up.)
+    Ok(MISSES.load(Ordering::Relaxed) == misses)
 }
 
 /// The translation of a console shader container, from the cache when
@@ -105,11 +135,10 @@ pub(crate) fn host_shader(container: &[u8]) -> Result<HostShader, String> {
 }
 
 /// The cache entry's converter: the build and the container in, the
-/// encoded translation out. `made` keeps the result so a miss need not
-/// read and decode the entry it just wrote.
+/// encoded translation out. `ran` tells a miss from a hit.
 struct Translate<F> {
     translate: F,
-    made: Mutex<Option<HostShader>>,
+    ran: AtomicBool,
 }
 
 impl<F: Fn(&[u8]) -> Result<HostShader, String> + Send + Sync> Converter for Translate<F> {
@@ -121,10 +150,9 @@ impl<F: Fn(&[u8]) -> Result<HostShader, String> + Send + Sync> Converter for Tra
         1
     }
     fn convert(&self, input: &[u8]) -> anyhow::Result<Vec<u8>> {
+        self.ran.store(true, Ordering::Relaxed);
         let shader = (self.translate)(&input[32..]).map_err(anyhow::Error::msg)?;
-        let bytes = encode(&shader);
-        *self.made.lock().unwrap_or_else(|e| e.into_inner()) = Some(shader);
-        Ok(bytes)
+        Ok(encode(&shader))
     }
 }
 
@@ -135,40 +163,22 @@ fn cached(
     translate: impl Fn(&[u8]) -> Result<HostShader, String> + Send + Sync,
 ) -> Result<HostShader, String> {
     let input = [&build[..], container].concat();
-    let mut converter = Translate {
+    let converter = Translate {
         translate,
-        made: Mutex::new(None),
+        ran: AtomicBool::new(false),
     };
     for _ in 0..2 {
-        let entry = cache.get_or_convert(&converter, &input);
-        if let Some(shader) = converter
-            .made
-            .get_mut()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-        {
-            MISSES.fetch_add(1, Ordering::Relaxed);
-            match entry {
-                Ok(path) => tracing::debug!(path = %path.display(), "shader translated and cached"),
-                Err(error) => {
-                    static WARNED: std::sync::Once = std::sync::Once::new();
-                    WARNED.call_once(|| {
-                        let key = leonida_pipeline::CacheKey::new(&converter, &input);
-                        let path = cache.path_for(&key);
-                        tracing::warn!(
-                            path = %path.display(),
-                            error = %format_args!("{error:#}"),
-                            "shader not cached; check cache folder permissions and free space"
-                        );
-                    });
-                }
-            }
-            return Ok(shader);
-        }
-        let path = entry.map_err(|e| format!("{e:#}"))?;
+        let path = cache
+            .get_or_convert(&converter, &input)
+            .map_err(|e| format!("{e:#}"))?;
         if let Some(shader) = std::fs::read(&path).ok().and_then(|b| decode(&b)) {
-            HITS.fetch_add(1, Ordering::Relaxed);
-            tracing::debug!(path = %path.display(), "shader from the cache");
+            let (counter, what) = if converter.ran.load(Ordering::Relaxed) {
+                (&MISSES, "translated and cached")
+            } else {
+                (&HITS, "from the cache")
+            };
+            counter.fetch_add(1, Ordering::Relaxed);
+            tracing::debug!(path = %path.display(), "shader {what}");
             return Ok(shader);
         }
         tracing::debug!(path = %path.display(), "unreadable shader cache entry; translating again");
@@ -269,16 +279,6 @@ fn encode(s: &HostShader) -> Vec<u8> {
             word(&mut out, value);
         }
     }
-    match s.independent_waves {
-        None => word(&mut out, 0),
-        Some(waves) => {
-            word(&mut out, 1);
-            for n in waves.original_threads().into_iter().chain(waves.native_threads()) {
-                word(&mut out, n);
-            }
-            word(&mut out, waves.wave_count());
-        }
-    }
     out
 }
 
@@ -347,20 +347,6 @@ fn decode(bytes: &[u8]) -> Option<HostShader> {
             shift: u8::try_from(r.word()?).ok().filter(|&s| s < 32)?,
         });
     }
-    let independent_waves = match r.word()? {
-        0 => None,
-        1 if stage == HwStage::Cs => {
-            let original = [r.word()?, r.word()?, r.word()?];
-            let native = [r.word()?, r.word()?, r.word()?];
-            let count = r.word()?;
-            let waves = leonida_shader::emit::IndependentWaves::new(original)?;
-            if native != waves.native_threads() || count != waves.wave_count() {
-                return None;
-            }
-            Some(waves)
-        }
-        _ => return None,
-    };
     r.0.is_empty().then_some(HostShader {
         stage,
         dxil,
@@ -371,7 +357,6 @@ fn decode(bytes: &[u8]) -> Option<HostShader> {
         root_srvs,
         root_uavs,
         root_indexed_views,
-        independent_waves,
     })
 }
 
@@ -406,47 +391,7 @@ mod tests {
                 byte_offset: 32,
                 shift: 5,
             }],
-            independent_waves: None,
         }
-    }
-
-    #[test]
-    fn independent_wave_execution_layout_survives_a_disk_cache_hit() {
-        let dir = tempfile::tempdir().unwrap();
-        let cache = Cache::open(dir.path()).unwrap();
-        let mut wanted = shader();
-        wanted.stage = HwStage::Cs;
-        wanted.independent_waves =
-            leonida_shader::emit::IndependentWaves::new([8, 16, 1]);
-        let first = cached(&cache, &[5; 32], b"authored layout", |_| Ok(wanted.clone())).unwrap();
-        assert_eq!(first, wanted);
-        let loaded = cached(&cache, &[5; 32], b"authored layout", |_| {
-            panic!("an undamaged entry must load without translating")
-        }).unwrap();
-        assert_eq!(loaded, wanted, "cache loss must not silently dispatch the wrong geometry");
-    }
-
-    #[test]
-    fn malformed_execution_layouts_cannot_be_loaded_from_cache() {
-        let mut wanted = shader();
-        wanted.stage = HwStage::Cs;
-        wanted.independent_waves = leonida_shader::emit::IndependentWaves::new([8, 16, 1]);
-        let valid = encode(&wanted);
-        assert_eq!(decode(&valid), Some(wanted));
-        // The tagged layout tail contains original and native dimensions,
-        // then wave count. Corruption must not create a different dispatch.
-        let tail = valid.len() - 32;
-        for (offset, replacement) in [(tail, 2u32), (tail + 4, 0),
-            (tail + 16, 32), (tail + 28, 3)]
-        {
-            let mut bad = valid.clone();
-            bad[offset..offset + 4].copy_from_slice(&replacement.to_le_bytes());
-            assert!(decode(&bad).is_none());
-        }
-        let mut graphics = valid.clone();
-        let pixel = STAGES.iter().position(|&stage| stage == HwStage::Ps).unwrap() as u32;
-        graphics[4..8].copy_from_slice(&pixel.to_le_bytes());
-        assert!(decode(&graphics).is_none());
     }
 
     #[test]
@@ -480,67 +425,6 @@ mod tests {
         // Failures are not stored.
         let fail = |_: &[u8]| Err::<HostShader, _>("unsupported".to_owned());
         assert!(cached(&cache, &build, b"other", fail).is_err());
-    }
-
-    #[test]
-    fn a_translation_survives_an_unwritable_cache() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("cache");
-        let cache = Cache::open(&root).unwrap();
-        std::fs::remove_dir(&root).unwrap();
-        std::fs::write(&root, b"not a folder").unwrap();
-        let runs = AtomicU64::new(0);
-        let translate = |_: &[u8]| {
-            runs.fetch_add(1, Ordering::Relaxed);
-            Ok(shader())
-        };
-
-        assert_eq!(cached(&cache, &[7; 32], b"a container", translate), Ok(shader()));
-        assert_eq!(runs.load(Ordering::Relaxed), 1, "the result was kept");
-        assert_eq!(std::fs::read(&root).unwrap(), b"not a folder");
-    }
-
-    #[test]
-    fn a_translation_survives_failed_publication_without_leaving_a_staging_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let cache = Cache::open(dir.path()).unwrap();
-        let runs = AtomicU64::new(0);
-        let translate = |_: &[u8]| {
-            runs.fetch_add(1, Ordering::Relaxed);
-            Ok(shader())
-        };
-        let build = [7; 32];
-        let container = b"a container";
-        assert_eq!(cached(&cache, &build, container, translate), Ok(shader()));
-        let entries = walk(dir.path());
-        assert_eq!(entries.len(), 1);
-        let entry = &entries[0];
-        std::fs::remove_file(entry).unwrap();
-        // A directory at the destination lets staging succeed but prevents publication.
-        std::fs::create_dir(entry).unwrap();
-
-        assert_eq!(cached(&cache, &build, container, translate), Ok(shader()));
-        assert_eq!(runs.load(Ordering::Relaxed), 2, "one translation per miss");
-        assert!(entry.is_dir(), "the conflicting destination was not removed");
-        assert!(walk(dir.path()).is_empty(), "the staging file was removed");
-    }
-
-    #[test]
-    fn translation_errors_are_reported_and_not_cached() {
-        let dir = tempfile::tempdir().unwrap();
-        let cache = Cache::open(dir.path()).unwrap();
-        let runs = AtomicU64::new(0);
-        let translate = |_: &[u8]| {
-            runs.fetch_add(1, Ordering::Relaxed);
-            Err::<HostShader, _>("synthetic translation refused".to_owned())
-        };
-
-        for expected in 1..=2 {
-            let error = cached(&cache, &[7; 32], b"a container", translate).unwrap_err();
-            assert!(error.contains("synthetic translation refused"), "{error}");
-            assert_eq!(runs.load(Ordering::Relaxed), expected);
-            assert!(walk(dir.path()).is_empty());
-        }
     }
 
     fn walk(dir: &std::path::Path) -> Vec<PathBuf> {

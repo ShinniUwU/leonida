@@ -19,6 +19,7 @@ extern "system" fn create_device(
 ) -> HRESULT {
     leonida_gpu::resource::use_allocator(super::xmem::XMemAlloc, super::xmem::XMemFree);
     leonida_gpu::resource::use_page_mapper(super::xmem::map_alias);
+    leonida_gpu::resource::use_many_page_mapper(super::xmem::map_aliases);
     #[cfg(windows)]
     leonida_gpu::on_failure(host_gpu_failed);
     device::create(adapter, parameters, iid, out)
@@ -36,35 +37,31 @@ fn host_gpu_failed(what: &str) -> ! {
     unreachable!("the process has ended")
 }
 
-/// The offline warm-up: see `leonida_gpu::shader_cache::warm`.
+/// Translates `container` into the cache ([`use_shader_cache`]) ahead of
+/// any run: whether it was there already, or why it does not translate.
+pub fn precompile(container: &[u8]) -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        leonida_gpu::shader_cache::precompile(container)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = container;
+        Err("no host".into())
+    }
+}
+
+/// The fork's offline warm-up (`leonida translate --warm`), by
+/// [`precompile`]: whether it was translated now.
 pub fn warm_shader(container: &[u8]) -> Result<bool, String> {
     #[cfg(windows)]
     {
-        leonida_gpu::shader_cache::warm(container)
+        leonida_gpu::shader_cache::precompile(container).map(|was_there| !was_there)
     }
     #[cfg(not(windows))]
     {
         let _ = container;
         Err("no shader cache on this host".into())
-    }
-}
-
-pub use leonida_gpu::adapter::Description as GraphicsAdapter;
-
-/// Describes the default graphics adapter without starting the GPU runtime.
-pub fn graphics_adapter() -> Result<GraphicsAdapter, String> {
-    leonida_gpu::adapter::describe()
-}
-
-/// See `leonida_gpu::probe_translation_host`.
-pub fn probe_translation_host() -> bool {
-    #[cfg(windows)]
-    {
-        leonida_gpu::probe_translation_host()
-    }
-    #[cfg(not(windows))]
-    {
-        false
     }
 }
 

@@ -5,10 +5,7 @@
 //! it is written: functions, then constants (all at module level), then the
 //! instructions of `main` in block order.
 
-use std::collections::{BTreeMap, HashMap};
-
-#[cfg(test)]
-pub(crate) mod execute;
+use std::collections::HashMap;
 
 pub mod census;
 pub mod opt;
@@ -225,8 +222,6 @@ pub(crate) struct Module {
     func_ids: HashMap<String, u32>,
     insts: Vec<Inst>,
     blocks: Vec<Block>,
-    /// Stores made conditional only after all historical block appends and phi edges settle.
-    guarded_stores: Vec<(usize, usize, V)>,
     mds: Vec<MdDef>,
     named: Vec<(String, Vec<Md>)>,
     /// See [`Tag`]: by instruction.
@@ -396,72 +391,6 @@ impl Module {
         self.blocks.len() - 1
     }
 
-    /// Install a prologue with no predecessors after emission. Block zero remains the
-    /// function entry; the former entry keeps its instructions and outgoing edges.
-    pub fn prepend_entry(&mut self, prologue: usize) {
-        debug_assert!(self.blocks[0].phis.is_empty() && self.blocks[prologue].phis.is_empty());
-        debug_assert!(
-            !self
-                .blocks
-                .iter()
-                .any(|b| successors(b.term).contains(&prologue))
-        );
-        self.blocks.swap(0, prologue);
-        for b in 0..self.blocks.len() {
-            self.redirect(b, 0, prologue);
-        }
-        for &to in successors(self.blocks[prologue].term).iter() {
-            self.replace_phi_predecessor(to, 0, prologue);
-        }
-    }
-
-    fn replace_phi_predecessor(&mut self, block: usize, old: usize, new: usize) {
-        for &id in &self.blocks[block].phis {
-            if let Op::Phi(incoming) = &mut self.insts[id as usize].op {
-                for (_, from) in incoming {
-                    if *from == old {
-                        *from = new;
-                    }
-                }
-            }
-        }
-    }
-
-    /// Guard just this store, keeping subsequent instructions on the common path.
-    /// Callers may still append to this block, including after its terminator was set.
-    pub fn guarded_store(&mut self, block: usize, condition: V, ptr: V, value: V) {
-        self.guarded_stores
-            .push((block, self.blocks[block].body.len(), condition));
-        self.store(block, ptr, value);
-    }
-
-    /// Split after lowering has finished filling phis, before entry relocation or optimisation.
-    pub fn expand_guarded_stores(&mut self) {
-        // Later appends have larger positions within a block. Splitting them first leaves
-        // every earlier recorded position intact, including multiple exchanges in a loop.
-        for (block, position, condition) in
-            std::mem::take(&mut self.guarded_stores).into_iter().rev()
-        {
-            let write = self.new_block();
-            let join = self.new_block();
-            let suffix = self.blocks[block].body.split_off(position + 1);
-            let store = self.blocks[block]
-                .body
-                .pop()
-                .expect("guarded store position");
-            assert!(matches!(self.insts[store as usize].op, Op::Store(..)));
-            let term = self.blocks[block].term.take();
-            self.blocks[write].body.push(store);
-            self.blocks[write].term = Some(Term::Br(join));
-            self.blocks[join].body = suffix;
-            self.blocks[join].term = term;
-            self.blocks[block].term = Some(Term::CondBr(condition, write, join));
-            for &to in successors(term).iter() {
-                self.replace_phi_predecessor(to, block, join);
-            }
-        }
-    }
-
     pub fn type_of(&self, v: V) -> Ty {
         match v {
             V::Global(i) => self.globals[i as usize].ptr,
@@ -518,27 +447,6 @@ impl Module {
             unreachable!()
         };
         self.push(block, ret, Op::Call(i, args))
-    }
-    /// A copy of the call `v` in `block` with operand `from` replaced by
-    /// `to`; `None` if `v` is no call reading `from`.
-    pub fn call_with(&mut self, block: usize, v: V, from: V, to: V) -> Option<V> {
-        let V::Inst(i) = v else { return None };
-        let Inst {
-            ty,
-            op: Op::Call(f, args),
-        } = &self.insts[i as usize]
-        else {
-            return None;
-        };
-        if !args.contains(&from) {
-            return None;
-        }
-        let args = args
-            .iter()
-            .map(|&a| if a == from { to } else { a })
-            .collect();
-        let (ty, f) = (*ty, *f);
-        Some(self.push(block, ty, Op::Call(f, args)))
     }
     /// A phi at the top of `block`; incoming values come with [`Module::set_phi`].
     pub fn phi(&mut self, block: usize, ty: Ty) -> V {
@@ -641,126 +549,7 @@ impl Module {
         live
     }
 
-    /// Gives every loop header one back edge, as DXC's code has:
-    /// vkd3d-proton's DXIL conversion keeps one per header, takes any other
-    /// for a forward edge and then recurses without end over the cycle that
-    /// makes (in programs with wave shuffles). The back edges of a header
-    /// with several go through a new block that joins their phi values.
-    ///
-    /// It also keeps one back edge per block. A block that branches back to
-    /// two headers (an inner loop's latch that leaves straight to the outer
-    /// loop's header, as the console flow's loops do) has its edge to the
-    /// outer header go through a new block of its own; otherwise dxil-spirv
-    /// takes that edge for a forward one, and its loop-exit search recurses
-    /// over the cycle until the process dies.
-    pub fn single_latches(&mut self) {
-        let n = self.blocks.len();
-        if n == 0 {
-            return;
-        }
-        // Depth-first from the entry: an edge to a block still on the stack
-        // is a back edge (the control flow is reducible).
-        let mut state = vec![0u8; n];
-        let mut stack = vec![(0usize, 0usize)];
-        state[0] = 1;
-        // When each block was reached: an outer loop's header before its
-        // inner loops' headers.
-        let mut reached = vec![0; n];
-        let mut next = 1;
-        let mut latches: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-        while let Some(top) = stack.last_mut() {
-            let (b, k) = *top;
-            let succ = successors(self.blocks[b].term);
-            if k < succ.len() {
-                top.1 += 1;
-                let t = succ[k];
-                match state[t] {
-                    0 => {
-                        state[t] = 1;
-                        reached[t] = next;
-                        next += 1;
-                        stack.push((t, 0));
-                    }
-                    1 => latches.entry(t).or_default().push(b),
-                    _ => {}
-                }
-            } else {
-                state[b] = 2;
-                stack.pop();
-            }
-        }
-        // Back edges left as they are: (latch, header).
-        let mut kept = Vec::new();
-        for (header, mut from) in latches {
-            from.sort_unstable();
-            from.dedup();
-            if let [b] = from[..] {
-                kept.push((b, reached[header], header));
-            }
-            if from.len() < 2 {
-                continue;
-            }
-            let latch = self.new_block();
-            for &b in &from {
-                self.redirect(b, header, latch);
-            }
-            self.blocks[latch].term = Some(Term::Br(header));
-            for id in self.blocks[header].phis.clone() {
-                let Op::Phi(incoming) = self.insts[id as usize].op.clone() else {
-                    continue;
-                };
-                let ty = self.insts[id as usize].ty;
-                let (back, mut rest): (Vec<_>, Vec<_>) =
-                    incoming.into_iter().partition(|(_, b)| from.contains(b));
-                if back.is_empty() {
-                    continue;
-                }
-                let joined = self.phi(latch, ty);
-                self.set_phi(joined, back);
-                rest.push((joined, latch));
-                self.insts[id as usize].op = Op::Phi(rest);
-            }
-        }
-        // A block has two successors, so at most one pair per block. The
-        // edge to the outer header (reached first) is the one moved: the
-        // block stays the inner loop's latch, the exiting block as in DXC's
-        // loops.
-        kept.sort_unstable();
-        for pair in kept.windows(2) {
-            let [(b, _, header), (also, ..)] = *pair else {
-                unreachable!()
-            };
-            if b != also {
-                continue;
-            }
-            let latch = self.new_block();
-            self.redirect(b, header, latch);
-            self.blocks[latch].term = Some(Term::Br(header));
-            for &id in &self.blocks[header].phis {
-                if let Op::Phi(incoming) = &mut self.insts[id as usize].op {
-                    for (_, from) in incoming.iter_mut().filter(|(_, from)| *from == b) {
-                        *from = latch;
-                    }
-                }
-            }
-        }
-    }
-
-    /// Makes `b`'s edges to `from` go to `to`.
-    fn redirect(&mut self, b: usize, from: usize, to: usize) {
-        let to = |t: usize| if t == from { to } else { t };
-        self.blocks[b].term = match self.blocks[b].term {
-            Some(Term::Br(t)) => Some(Term::Br(to(t))),
-            Some(Term::CondBr(c, t, f)) => Some(Term::CondBr(c, to(t), to(f))),
-            other => other,
-        };
-    }
-
     pub fn write(&self) -> Vec<u8> {
-        debug_assert!(
-            self.guarded_stores.is_empty(),
-            "guarded stores must be expanded first"
-        );
         let mut w = Writer::default();
         w.bytes(b"BC\xC0\xDE");
         w.enter(MODULE_BLOCK, 3);
@@ -927,14 +716,10 @@ impl Module {
         // An empty latch (only a branch back to its loop header) is folded
         // into its one predecessor, so the exiting block is the latch as in
         // DXC's loops; the AMD driver hangs on divergent loops otherwise.
-        // Not into a block that already branches back: that would undo the
-        // one back edge per block of `single_latches`.
         let mut preds = vec![Vec::new(); self.blocks.len()];
-        let mut branches_back = vec![false; self.blocks.len()];
         for &b in &post {
             for &s in succs(b).iter() {
                 preds[s].push(b);
-                branches_back[b] |= pos[s] <= pos[b];
             }
         }
         let mut fold = vec![None; self.blocks.len()];
@@ -942,14 +727,12 @@ impl Module {
             let blk = &self.blocks[b];
             if let (Some(Term::Br(h)), true, [p]) = (
                 blk.term,
-                blk.phis.is_empty() && blk.body.is_empty(),
+                blk.phis.iter().all(|&i| !live[i as usize]) && blk.body.is_empty(),
                 &preds[b][..],
             ) && pos[h] < pos[b]
                 && !succs(*p).contains(&h)
-                && !branches_back[*p]
             {
                 fold[b] = Some((*p, h));
-                branches_back[*p] = true;
             }
         }
         let layout: Vec<usize> = post.into_iter().filter(|&b| fold[b].is_none()).collect();
@@ -1265,122 +1048,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn chunked_code_tables_keep_every_address_and_bound_every_load() {
-        use crate::emit::code_table::CodeTable;
-
-        #[derive(Clone, Copy)]
-        enum Evaluated {
-            Word(u32),
-            Pointer(u32, usize),
-        }
-
-        // Execute the actual emitted SSA, including loads whose results a later select
-        // discards. This catches an out-of-bounds load from the final short chunk.
-        fn evaluate(m: &Module, result: V, input: u32) -> u32 {
-            let mut values = Vec::new();
-            for inst in &m.insts {
-                let word = |v| match v {
-                    V::Const(i) => match m.consts[i as usize].1 {
-                        Const::Int(x) => x as u32,
-                        _ => panic!("not an integer constant"),
-                    },
-                    V::Inst(i) => match values[i as usize] {
-                        Evaluated::Word(x) => x,
-                        _ => panic!("not an integer instruction"),
-                    },
-                    _ => panic!("not an integer value"),
-                };
-                let value = match &inst.op {
-                    Op::Call(_, args) => {
-                        assert!(args.is_empty());
-                        Evaluated::Word(input)
-                    }
-                    Op::Bin(op, a, b) => Evaluated::Word(match op {
-                        Bin::Sub => word(*a).wrapping_sub(word(*b)),
-                        Bin::LShr => word(*a) >> word(*b),
-                        Bin::And => word(*a) & word(*b),
-                        _ => panic!("unexpected binary operation: {op:?}"),
-                    }),
-                    Op::Cmp(op, a, b) => Evaluated::Word(u32::from(match *op {
-                        pred::IUGT => word(*a) > word(*b),
-                        pred::EQ => word(*a) == word(*b),
-                        _ => panic!("unexpected comparison"),
-                    })),
-                    Op::Select(c, t, f) => {
-                        Evaluated::Word(if word(*c) != 0 { word(*t) } else { word(*f) })
-                    }
-                    Op::Gep(_, V::Global(g), indices) => {
-                        assert_eq!(indices.len(), 2);
-                        assert_eq!(word(indices[0]), 0);
-                        Evaluated::Pointer(*g, word(indices[1]) as usize)
-                    }
-                    Op::Load(V::Inst(p)) => {
-                        let Evaluated::Pointer(g, index) = values[*p as usize] else {
-                            panic!("not a table pointer");
-                        };
-                        let init = m.globals[g as usize].init.expect("initialized table");
-                        let Const::Aggregate(elems) = &m.consts[init as usize].1 else {
-                            panic!("not a constant table");
-                        };
-                        let element = *elems.get(index).expect("every load must be in bounds");
-                        Evaluated::Word(word(V::Const(element)))
-                    }
-                    op => panic!("unexpected code-table operation: {op:?}"),
-                };
-                values.push(value);
-            }
-            let V::Inst(i) = result else {
-                panic!("not an emitted result")
-            };
-            let Evaluated::Word(result) = values[i as usize] else {
-                panic!("not a word")
-            };
-            result
-        }
-
-        for len in [1usize, 1023, 1024, 1025, 2048, 4096, 4097, 4099, 8195] {
-            let words: Vec<u32> = (0..len)
-                .map(|i| (i as u32).wrapping_mul(0x9e37_79b9))
-                .collect();
-            for (base, chunked) in [0u32, 0x1200, 0xffff_f000]
-                .into_iter()
-                .flat_map(|base| [false, true].map(|chunked| (base, chunked)))
-            {
-                let mut m = Module::default();
-                let i32t = m.int(32);
-                let fty = m.func_ty(i32t, vec![]);
-                let input = m.function("input", fty, Some(Attr::ReadNone), false);
-                let block = m.new_block();
-                let byte = m.call(block, input, vec![]);
-                let table = CodeTable::new(&mut m, base, &words, chunked);
-                let result = table.read(&mut m, block, byte);
-                let chunk_len = if chunked && len > 4096 { 1024 } else { len };
-                assert_eq!(m.globals.len(), len.div_ceil(chunk_len));
-                for g in &m.globals {
-                    assert!(matches!(
-                        m.types[g.ty.0 as usize],
-                        TypeDef::Array(n, _) if n as usize <= chunk_len
-                    ));
-                }
-                // Every byte (including unaligned reads), chunk edges, the final short
-                // chunk, instruction-prefix addresses, underflow and 32-bit wrap.
-                let bytes = (0..4 * len as u32 + 8)
-                    .map(|offset| base.wrapping_add(offset))
-                    .chain([0, 1, base.wrapping_sub(1), u32::MAX - 3, u32::MAX]);
-                for byte in bytes {
-                    let index = (byte.wrapping_sub(base) / 4) as usize;
-                    let expected = words[index.min(words.len() - 1)];
-                    assert_eq!(
-                        evaluate(&m, result, byte),
-                        expected,
-                        "{len} words, {base:#x}, {byte:#x}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
     fn vbr_and_blocks() {
         let mut w = Writer::default();
         w.vbr(5, 6);
@@ -1530,69 +1197,42 @@ mod tests {
     }
 
     #[test]
-    fn entry_prologue_preserves_loop_phi_values() {
-        let mut m = Module::default();
-        let [entry, header, exit, prologue] = [(); 4].map(|()| m.new_block());
-        let (zero, one, limit) = (m.i32(0), m.i32(1), m.i32(3));
-        let count = m.phi(header, m.type_of(zero));
-        let next = m.bin(header, Bin::Add, count, one);
-        let repeat = m.cmp(header, pred::IULT, next, limit);
-        m.set_phi(count, vec![(zero, entry), (next, header)]);
-        m.terminate(entry, Term::Br(header));
-        m.terminate(header, Term::CondBr(repeat, header, exit));
-        m.terminate(exit, Term::Ret);
-        m.terminate(prologue, Term::Br(entry));
-
-        m.prepend_entry(prologue);
-
-        execute::check_phis(&m);
-        let result = execute::run(&m, 6);
-        assert_eq!(
-            result.blocks,
-            [entry, prologue, header, header, header, exit]
-        );
-        assert_eq!(result.values[&next], 3);
-    }
-
-    #[test]
-    fn guarded_stores_preserve_historical_appends_loop_phis_and_entry_relocation() {
-        let mut m = Module::default();
-        let [entry, header, exit, prologue] = [(); 4].map(|()| m.new_block());
-        let (zero, one, three, ten) = (m.i32(0), m.i32(1), m.i32(3), m.i32(10));
-        let ptr = m.global("mailbox", m.type_of(zero), 3);
-        let count = m.phi(header, m.type_of(zero));
-        let next = m.bin(header, Bin::Add, count, one);
-        let middle = m.cmp(header, pred::EQ, count, one);
-        m.guarded_store(header, middle, ptr, next);
-        let other = m.cmp(header, pred::NE, count, one);
-        let plus = m.bin(header, Bin::Add, next, ten);
-        let repeat = m.cmp(header, pred::IULT, next, three);
-        m.set_phi(count, vec![(zero, entry), (next, header)]);
-        m.terminate(entry, Term::Br(header));
-        m.terminate(header, Term::CondBr(repeat, header, exit));
-        // A historical block can still receive an exchange after its terminator is known.
-        m.guarded_store(header, other, ptr, plus);
-        let result = m.phi(exit, m.type_of(zero));
-        m.set_phi(result, vec![(plus, header)]);
-        m.terminate(exit, Term::Ret);
-        let never = m.bool(false);
-        m.guarded_store(entry, never, ptr, zero);
-        m.terminate(prologue, Term::Br(entry));
-
-        m.expand_guarded_stores();
-        m.prepend_entry(prologue);
-
-        execute::check_phis(&m);
-        let actual = execute::run(&m, 24);
-        assert_eq!(actual.stores, [(ptr, 11), (ptr, 2), (ptr, 13)]);
-        assert_eq!(actual.values[&result], 13);
-        // The ordinary cleanup must preserve the guarded effects and all repaired phi edges.
-        m.optimise(opt::ALL);
-        m.single_latches();
-        execute::check_phis(&m);
-        let optimised = execute::run(&m, 24);
-        assert_eq!(optimised.stores, actual.stores);
-        assert!(!m.write().is_empty());
+    fn empty_latch_with_dead_phis_is_folded() {
+        // Two identical loops except one has an unread phi in its empty latch;
+        // both must fold the latch and emit identical bitcode.
+        let build = |with_dead_phi: bool| {
+            let mut m = Module::default();
+            let i32t = m.int(32);
+            let void = m.void();
+            let fty = m.func_ty(void, vec![i32t]);
+            let f = m.function("sink", fty, Some(Attr::NoUnwind), false);
+            let main_ty = m.func_ty(void, vec![]);
+            m.function("main", main_ty, None, true);
+            let (entry, head, body, latch, exit) = (
+                m.new_block(),
+                m.new_block(),
+                m.new_block(),
+                m.new_block(),
+                m.new_block(),
+            );
+            let (z, one, ten) = (m.i32(0), m.i32(1), m.i32(10));
+            m.terminate(entry, Term::Br(head));
+            let i = m.phi(head, i32t);
+            m.terminate(head, Term::Br(body));
+            let next = m.bin(body, Bin::Add, i, one);
+            let cond = m.cmp(body, pred::IULT, next, ten);
+            m.terminate(body, Term::CondBr(cond, latch, exit));
+            if with_dead_phi {
+                let dead = m.phi(latch, i32t);
+                m.set_phi(dead, vec![(next, body)]);
+            }
+            m.terminate(latch, Term::Br(head));
+            m.set_phi(i, vec![(z, entry), (next, latch)]);
+            let _ = m.call(exit, f, vec![next]);
+            m.terminate(exit, Term::Ret);
+            m.write()
+        };
+        assert_eq!(build(false), build(true));
     }
 
     #[test]
@@ -1601,128 +1241,6 @@ mod tests {
         assert!(successors(Some(Term::Ret)).is_empty());
         assert_eq!(&*successors(Some(Term::Br(7))), &[7]);
         assert_eq!(&*successors(Some(Term::CondBr(V::Const(0), 3, 5))), &[3, 5]);
-    }
-
-    /// A loop header with two back edges gets one, through a new block that
-    /// joins what each brings (vkd3d-proton keeps one per header).
-    #[test]
-    fn a_header_with_two_back_edges_gets_one() {
-        let mut m = Module::default();
-        let i32t = m.int(32);
-        let void = m.void();
-        let main_ty = m.func_ty(void, vec![]);
-        m.function("main", main_ty, None, true);
-        let [entry, head, body, mid, exit] = [(); 5].map(|()| m.new_block());
-        let (zero, one, two) = (m.i32(0), m.i32(1), m.i32(2));
-        m.terminate(entry, Term::Br(head));
-        let p = m.phi(head, i32t);
-        m.terminate(head, Term::Br(body));
-        let x = m.bin(body, Bin::Add, p, one);
-        let c = m.cmp(body, pred::IULT, x, two);
-        m.terminate(body, Term::CondBr(c, head, mid));
-        let y = m.bin(mid, Bin::Add, x, one);
-        let d = m.cmp(mid, pred::IULT, y, two);
-        m.terminate(mid, Term::CondBr(d, head, exit));
-        m.terminate(exit, Term::Ret);
-        m.set_phi(p, vec![(zero, entry), (x, body), (y, mid)]);
-        m.single_latches();
-        let latch = m.blocks.len() - 1;
-        assert_eq!(&*successors(m.blocks[body].term), &[latch, mid]);
-        assert_eq!(&*successors(m.blocks[mid].term), &[latch, exit]);
-        assert_eq!(&*successors(m.blocks[latch].term), &[head]);
-        let phi = |m: &Module, v: V| match v {
-            V::Inst(id) => match &m.insts[id as usize].op {
-                Op::Phi(incoming) => incoming.clone(),
-                op => panic!("{op:?}"),
-            },
-            v => panic!("{v:?}"),
-        };
-        let incoming = phi(&m, p);
-        assert_eq!(incoming[0], (zero, entry));
-        assert_eq!(incoming[1].1, latch);
-        assert_eq!(phi(&m, incoming[1].0), [(x, body), (y, mid)]);
-        assert!(!m.write().is_empty());
-    }
-
-    /// An inner loop's latch that leaves straight to the outer loop's header
-    /// branches back to two headers; the edge to the outer one goes through
-    /// a block of its own (vkd3d-proton keeps one back edge per block).
-    #[test]
-    fn a_block_branching_back_to_two_headers_gets_one_back_edge() {
-        let mut m = Module::default();
-        let i32t = m.int(32);
-        let void = m.void();
-        let main_ty = m.func_ty(void, vec![]);
-        m.function("main", main_ty, None, true);
-        let [entry, outer, inner, body, exit] = [(); 5].map(|()| m.new_block());
-        let (zero, one, two) = (m.i32(0), m.i32(1), m.i32(2));
-        m.terminate(entry, Term::Br(outer));
-        let o = m.phi(outer, i32t);
-        let c = m.cmp(outer, pred::IULT, o, two);
-        m.terminate(outer, Term::CondBr(c, inner, exit));
-        let i = m.phi(inner, i32t);
-        m.terminate(inner, Term::Br(body));
-        let x = m.bin(body, Bin::Add, i, one);
-        let d = m.cmp(body, pred::IULT, x, two);
-        m.terminate(body, Term::CondBr(d, inner, outer));
-        m.terminate(exit, Term::Ret);
-        m.set_phi(o, vec![(zero, entry), (x, body)]);
-        m.set_phi(i, vec![(o, outer), (x, body)]);
-        m.single_latches();
-        let latch = m.blocks.len() - 1;
-        assert_eq!(&*successors(m.blocks[body].term), &[inner, latch]);
-        assert_eq!(&*successors(m.blocks[latch].term), &[outer]);
-        let incoming = |v: V| match v {
-            V::Inst(id) => match &m.insts[id as usize].op {
-                Op::Phi(incoming) => incoming.clone(),
-                op => panic!("{op:?}"),
-            },
-            v => panic!("{v:?}"),
-        };
-        assert_eq!(incoming(o), [(zero, entry), (x, latch)]);
-        assert_eq!(incoming(i), [(o, outer), (x, body)]);
-        assert!(!m.write().is_empty());
-    }
-
-    /// An empty latch is not folded into a block that already branches
-    /// back: two empty latches after one block, to two headers, keep one.
-    #[test]
-    fn empty_latches_to_two_headers_fold_once() {
-        // `latches`: the inner and outer back edges each through an empty
-        // block; otherwise only the inner one, the outer one direct.
-        let build = |latches: bool| {
-            let mut m = Module::default();
-            let i32t = m.int(32);
-            let void = m.void();
-            let fty = m.func_ty(i32t, vec![i32t]);
-            let f = m.function("source", fty, Some(Attr::NoUnwind), false);
-            let main_ty = m.func_ty(void, vec![]);
-            m.function("main", main_ty, None, true);
-            let [entry, outer, inner, body, exit] = [(); 5].map(|()| m.new_block());
-            let two = m.i32(2);
-            let x = m.call(entry, f, vec![two]);
-            m.terminate(entry, Term::Br(outer));
-            let c = m.cmp(outer, pred::IULT, x, two);
-            m.terminate(outer, Term::CondBr(c, inner, exit));
-            m.terminate(inner, Term::Br(body));
-            let d = m.cmp(body, pred::IULT, x, two);
-            let to_inner = m.new_block();
-            m.terminate(to_inner, Term::Br(inner));
-            let to_outer = if latches {
-                let l = m.new_block();
-                m.terminate(l, Term::Br(outer));
-                l
-            } else {
-                outer
-            };
-            m.terminate(body, Term::CondBr(d, to_inner, to_outer));
-            m.terminate(exit, Term::Ret);
-            m.write()
-        };
-        // Folding both would give `body` both back edges. The outer latch
-        // (first in reverse postorder) folds and the inner one stays, as
-        // when `body` branches back to `outer` itself.
-        assert_eq!(build(true), build(false));
     }
 
     /// The written bytes are pinned to what the writer produced before the

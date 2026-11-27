@@ -46,8 +46,8 @@
 //! Only for a texture the title places in memory and fills, two-dimensional,
 //! one layer, more than one level, of [`floor`] bytes or more, whose memory
 //! is not all its own when the host copy is made (`resource.rs` `hosted`);
-//! every other texture is made as before. On by default;
-//! `LEONIDA_LEVELS_ON_DEMAND=0` makes every texture as before.
+//! every other texture is made as before. Off unless
+//! `LEONIDA_LEVELS_ON_DEMAND=1`.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -72,13 +72,13 @@ const HEAP_TILES: u32 = 1024;
 pub(crate) static STATS: [AtomicU64; 11] = [const { AtomicU64::new(0) }; 11];
 
 /// Whether textures are made this way: the switch
-/// (on by default; `LEONIDA_LEVELS_ON_DEMAND=0` turns it off), and a card
-/// that reads zeros from, and drops writes to, levels without memory (tiled
-/// resources tier 2).
+/// (`LEONIDA_LEVELS_ON_DEMAND=1`; off by default), and a card that reads
+/// zeros from, and drops writes to, levels without memory (tiled resources
+/// tier 2).
 pub(crate) fn wanted() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        if !switched_on(std::env::var_os("LEONIDA_LEVELS_ON_DEMAND").as_deref()) {
+        if !std::env::var_os("LEONIDA_LEVELS_ON_DEMAND").is_some_and(|v| v == "1") {
             return false;
         }
         let Some(host) = host() else {
@@ -99,14 +99,10 @@ pub(crate) fn wanted() -> bool {
             tier,
             on,
             floor_kb = floor() >> 10,
-            "host copies of title textures take the card's memory level by level (LEONIDA_LEVELS_ON_DEMAND=0 turns it off)"
+            "host copies of title textures take the card's memory level by level (LEONIDA_LEVELS_ON_DEMAND=1)"
         );
         on
     })
-}
-
-fn switched_on(value: Option<&std::ffi::OsStr>) -> bool {
-    value.is_none_or(|v| v != "0")
 }
 
 fn parse_floor(value: Option<&str>) -> u64 {
@@ -573,6 +569,7 @@ impl Tiled {
             }
             STATS[6].fetch_add(1, Ordering::Relaxed);
             STATS[7].fetch_add(began.elapsed().as_micros() as u64, Ordering::Relaxed);
+            crate::host::tiles_mapped_on(queue);
             match level {
                 Some(level) => given.levels[level] = true,
                 None => given.packed = true,
@@ -1482,15 +1479,6 @@ void look() {
         assert_eq!(parse_floor(Some("2048")), 2048 << 10);
         assert_eq!(parse_floor(Some(&(1u64 << 54).to_string())), u64::MAX);
         assert_eq!(parse_floor(Some(&u64::MAX.to_string())), u64::MAX);
-    }
-
-    #[test]
-    fn levels_on_demand_is_on_unless_switched_off() {
-        use std::ffi::OsStr;
-        assert!(switched_on(None));
-        assert!(switched_on(Some(OsStr::new("1"))));
-        assert!(switched_on(Some(OsStr::new(""))));
-        assert!(!switched_on(Some(OsStr::new("0"))));
     }
 
     #[test]

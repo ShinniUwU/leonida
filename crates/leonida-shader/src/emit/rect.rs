@@ -55,10 +55,7 @@ pub fn rect_list_gs(vs: &[u8], ps: Option<&[u8]>) -> Result<Vec<u8>, ShaderError
             None => Ok(Vec::new()),
         }
     };
-    let mut outputs = sig(vs, FourCC::OSG1)?;
-    if let Some(psv) = Container::parse(vs)?.part(FourCC::PSV0) {
-        super::container::take_modes(psv.data, 1, &mut outputs);
-    }
+    let outputs = sig(vs, FourCC::OSG1)?;
     let wanted = match ps {
         Some(ps) => sig(ps, FourCC::ISG1)?,
         None => Vec::new(),
@@ -81,16 +78,13 @@ fn build(mut outputs: Vec<SigElement>, ps_inputs: &[SigElement]) -> Result<Vec<u
     };
     for e in &mut outputs {
         // Interpolation as `emit_program` declares a vertex shader's
-        // outputs (the modes its PSV0 lists, else these); a geometry
-        // shader's inputs carry the same modes.
-        if e.interp == 0 {
-            e.interp = match (e.kind, e.comp) {
-                (3, _) => 4,
-                (0 | 6 | 7, 9) => 2,
-                (0, _) => 1,
-                _ => 0,
-            };
-        }
+        // outputs; a geometry shader's inputs carry the same modes.
+        e.interp = match (e.kind, e.comp) {
+            (3, _) => 4,
+            (0 | 6 | 7, 9) => 2,
+            (0, _) => 1,
+            _ => 0,
+        };
         e.usage = (1 << e.cols) - 1;
     }
     let mut s = Shader::new(false);
@@ -421,7 +415,6 @@ mod tests {
             root_srvs: Vec::new(),
             root_uavs: Vec::new(),
             root_indexed_views: Vec::new(),
-            independent_waves: None,
         };
         (
             host(crate::native::HwStage::Vs, vs),

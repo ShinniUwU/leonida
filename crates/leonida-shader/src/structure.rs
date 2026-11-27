@@ -792,6 +792,9 @@ impl<'a> Lanes<'a> {
             .iter()
             .enumerate()
             .map(|(n, block)| {
+                // Reachability is fixed within the block. Vector instructions
+                // with the same EXEC therefore need the same guard.
+                let mut last_guard = None;
                 block
                     .insts
                     .iter()
@@ -801,8 +804,16 @@ impl<'a> Lanes<'a> {
                         | (_, Fields::Sop { .. } | Fields::Sopp { .. } | Fields::Smem { .. }) => {
                             None
                         }
-                        (&Some(e), _) if b.implies(cond[n], e) => None,
-                        (&Some(e), _) => Some(b.given(e, cond[n])),
+                        (&Some(e), _) => {
+                            if let Some((prev, guard)) = last_guard
+                                && prev == e
+                            {
+                                return guard;
+                            }
+                            let guard = (!b.implies(cond[n], e)).then(|| b.given(e, cond[n]));
+                            last_guard = Some((e, guard));
+                            guard
+                        }
                     })
                     .collect()
             })
@@ -916,39 +927,6 @@ impl<'a> Lanes<'a> {
                         i.write(Reg::S(EXEC)) == Some(v) || i.write(Reg::S(EXEC + 1)) == Some(v)
                     })
                 };
-                // Each half copied on its own from the same half of another
-                // pair (a mask parked in VGPR lanes and read back, `ir::unspill`):
-                // the pair copied.
-                let copied = |d: Option<(usize, usize)>, v: Value| {
-                    let i = def(d)?;
-                    let Fields::Sop { src, .. } = &i.fields else {
-                        return None;
-                    };
-                    match (i.name(), src.first()) {
-                        ("s_mov_b32", Some(&Operand::Scalar { code, .. }))
-                            if code != NULL && i.writes.first().map(|w| w.1) == Some(v) =>
-                        {
-                            Some((i, code))
-                        }
-                        _ => None,
-                    }
-                };
-                if m.is_none()
-                    && lo != hi
-                    && let (Some((a, ca)), Some((b, cb))) = (copied(lo, k.0), copied(hi, k.1))
-                    && ca.checked_add(1) == Some(cb)
-                    && let (Some(x), Some(y)) = (a.read(Reg::S(ca)), b.read(Reg::S(cb)))
-                    && (x, y) != k
-                {
-                    let r = self.mask((x, y));
-                    let cache = if r.1 {
-                        &mut self.masks
-                    } else {
-                        &mut self.other
-                    };
-                    cache.insert(k, r.0);
-                    return r;
-                }
                 let derived = exec_write(lo, k.0) || exec_write(hi, k.1);
                 // shortcut: the atom names the pair by its low dword, and
                 // lowering takes the high dword written beside it. For halves
@@ -991,18 +969,6 @@ impl<'a> Lanes<'a> {
         let args: Vec<Key> = (0..target.preds.len())
             .map(|n| (arg(lo, k.0, n), arg(hi, k.1, n)))
             .collect();
-        // A register holding a mask on one path and a dword read from memory
-        // on another is a number the compiler reuses: no lane mask comes back
-        // from a scalar load.
-        let loaded = |v: Value| {
-            self.defs
-                .get(&v)
-                .is_some_and(|&(b, i)| matches!(p.blocks[b].insts[i].fields, Fields::Smem { .. }))
-        };
-        if args.iter().any(|&(a, b)| loaded(a) || loaded(b)) {
-            let born = self.born(k.0);
-            return Some((self.b.atom(Atom::Opaque(k.0), born), false));
-        }
         let id = lo.map_or(k.1, |_| k.0);
         let mut derived = self.derived_phis.contains(&id);
         // (edge condition, mask) per forward edge; back edges come later.
@@ -1623,6 +1589,37 @@ mod tests {
     }
 
     #[test]
+    fn guards_follow_exec_and_block_reachability() {
+        let p = build(
+            &[
+                0x7DA4_0080, // v_cmpx_eq_u32 exec, 0, v0
+                0x7E02_0280, // v_mov_b32 v1, 0
+                0x7E04_0280, // v_mov_b32 v2, 0
+                0xBF88_0005, // s_cbranch_execz -> end
+                0x7E06_0280, // v_mov_b32 v3, 0
+                0x7DA4_0880, // v_cmpx_eq_u32 exec, 0, v4
+                0x7E06_0280, // v_mov_b32 v3, 0
+                0xBE82_0480, // s_mov_b64 s[2:3], 0
+                0x7E0A_0280, // v_mov_b32 v5, 0
+                S_ENDPGM,
+            ],
+            true,
+        );
+        let s = structure(&p).unwrap();
+        let lane = |block: usize, i: usize| {
+            Atom::Lane(p.blocks[block].insts[i].write(Reg::S(EXEC)).unwrap())
+        };
+        let a = s.guards[0][1].unwrap();
+        let b = s.guards[1][2].unwrap();
+        assert_eq!(s.bools.node(a), Some((lane(0, 0), Bool::FALSE, Bool::TRUE)));
+        assert_eq!(s.guards[0], [None, Some(a), Some(a), None]);
+        // The fallthrough already implies the first compare. Only the second
+        // compare needs testing, and the scalar move never needs a guard.
+        assert_eq!(s.bools.node(b), Some((lane(1, 1), Bool::FALSE, Bool::TRUE)));
+        assert_eq!(s.guards[1], [None, None, Some(b), None, Some(b)]);
+    }
+
+    #[test]
     fn divergent_loop_exits_per_lane() {
         let p = build(
             &[
@@ -1733,80 +1730,6 @@ mod tests {
                 "{reader:#x}: vcc_hi was zeroed after the compare"
             );
         }
-    }
-
-    #[test]
-    fn a_mask_copied_one_half_at_a_time_is_the_mask_copied() {
-        let cnd = 256 | (256 << 9) | (2 << 18);
-        let copy = |hi: u32| {
-            build(
-                &[
-                    0x7D84_0080, // v_cmp_eq_u32 vcc, 0, v0
-                    0xBE82_036A, // s_mov_b32 s2, vcc_lo
-                    hi,
-                    0xD501_0001,
-                    cnd, // v_cndmask_b32 v1, v0, v0, s[2:3]
-                    S_ENDPGM,
-                ],
-                true,
-            )
-        };
-        // s_mov_b32 s3, vcc_hi: the compare.
-        let p = copy(0xBE83_036B);
-        let s = structure(&p).unwrap();
-        let cmp = p.blocks[0].insts[0].write(Reg::S(VCC)).unwrap();
-        let lo = p.blocks[0].insts[1].write(Reg::S(2)).unwrap();
-        assert_eq!(
-            s.masks.get(&lo).and_then(|&m| s.bools.node(m)),
-            Some((Atom::Lane(cmp), Bool::FALSE, Bool::TRUE))
-        );
-        // s_mov_b32 s3, 0: lanes 32-63 clear, not the compare.
-        let p = copy(0xBE83_0380);
-        let s = structure(&p).unwrap();
-        let cmp = p.blocks[0].insts[0].write(Reg::S(VCC)).unwrap();
-        let lo = p.blocks[0].insts[1].write(Reg::S(2)).unwrap();
-        assert_ne!(
-            s.masks.get(&lo).and_then(|&m| s.bools.node(m)),
-            Some((Atom::Lane(cmp), Bool::FALSE, Bool::TRUE))
-        );
-    }
-
-    #[test]
-    fn a_register_joining_a_mask_with_loaded_data_is_no_mask() {
-        // s4 is a compare's mask on the branch taken, a dword read from a
-        // buffer on the other path; after the join it is masked as a number.
-        let p = build(
-            &[
-                0xD4C2_0004,
-                0x0002_0080, // v_cmp_eq_u32 s4, 0, v0
-                0xBF06_8000, // s_cmp_eq_u32 s0, 0
-                0xBF85_0002, // s_cbranch_scc1 +2
-                0xF420_0104,
-                0xFA00_0000, // s_buffer_load_dword s4, s[8:11], 0
-                0x8705_FF04,
-                0x001F_FFFF, // s_and_b32 s5, s4, 0x1fffff
-                0x7E02_0205, // v_mov_b32 v1, s5
-                S_ENDPGM,
-            ],
-            false,
-        );
-        let s = structure(&p).unwrap();
-        let joined = p
-            .blocks
-            .iter()
-            .flat_map(|b| &b.phis)
-            .find(|phi| phi.reg == Reg::S(4))
-            .unwrap()
-            .value;
-        let and = p
-            .blocks
-            .iter()
-            .flat_map(|b| &b.insts)
-            .find(|i| i.name() == "s_and_b32")
-            .and_then(|i| i.write(Reg::S(5)))
-            .unwrap();
-        assert!(!s.masks.contains_key(&joined));
-        assert!(!s.masks.contains_key(&and));
     }
 
     #[test]

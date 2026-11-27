@@ -72,8 +72,7 @@ pub(crate) fn signature(elements: &[SigElement], input: bool) -> Vec<u8> {
     // Validator 1.6 writes one name per element in element order, repeats
     // included, except that system values share theirs (it keys names by
     // the semantic's string, which is one static string per system value);
-    // the rows sorted by register (unallocated last), then by name offset: in
-    // element order within a register, not by column.
+    // the rows sorted by register (unallocated last), then name offset.
     let mut offsets: Vec<u32> = Vec::new();
     let mut next = 8 + 32 * elements.len() as u32;
     let mut names = Vec::new();
@@ -91,7 +90,7 @@ pub(crate) fn signature(elements: &[SigElement], input: bool) -> Vec<u8> {
         }
     }
     let mut order: Vec<usize> = (0..elements.len()).collect();
-    order.sort_by_key(|&i| elements[i].row.unwrap_or(u32::MAX));
+    order.sort_by_key(|&i| (elements[i].row.unwrap_or(u32::MAX), offsets[i]));
     for i in order {
         let (e, offset) = (&elements[i], offsets[i]);
         let used = e.usage << e.col;
@@ -114,94 +113,6 @@ pub(crate) fn signature(elements: &[SigElement], input: bool) -> Vec<u8> {
         out.push(0);
     }
     out
-}
-
-/// The start register, start column and interpolation mode `PSV0` (runtime
-/// info version 1 or later) gives each allocated element of signature
-/// `which` (0 inputs, 1 outputs, 2 patch constants or primitives); `None`
-/// if the part lists no signature elements or is cut short.
-pub(crate) fn psv_modes(psv: &[u8], which: usize) -> Option<Vec<(u32, u8, u8)>> {
-    let u32_at = |at: usize| -> Option<usize> {
-        let b = psv.get(at..at.checked_add(4)?)?;
-        Some(u32::from_le_bytes(b.try_into().ok()?) as usize)
-    };
-    let info = u32_at(0)?;
-    if info < 36 || which > 2 {
-        return None;
-    }
-    let counts: Vec<usize> = psv.get(4 + 28..4 + 31)?.iter().map(|&n| n.into()).collect();
-    if counts.iter().sum::<usize>() == 0 {
-        return None;
-    }
-    let mut at = 4 + info;
-    let resources = u32_at(at)?;
-    at += 4;
-    if resources > 0 {
-        at += 4 + u32_at(at)?.checked_mul(resources)?;
-    }
-    at += 4 + u32_at(at)?;
-    at += 4 + 4 * u32_at(at)?;
-    let size = u32_at(at)?;
-    if size < 14 {
-        return None;
-    }
-    let first = at + 4 + size * counts[..which].iter().sum::<usize>();
-    let mut out = Vec::new();
-    for k in 0..counts[which] {
-        let e = psv.get(first + size * k..first + size * k + 14)?;
-        if e[10] & 0x40 != 0 {
-            out.push((u32::from(e[9]), (e[10] >> 4) & 3, e[13]));
-        }
-    }
-    Some(out)
-}
-
-/// Each element of `elements` takes the interpolation mode `PSV0` gives the
-/// element at its register and column in signature `which`, if any.
-pub(crate) fn take_modes(psv: &[u8], which: usize, elements: &mut [SigElement]) {
-    let Some(modes) = psv_modes(psv, which) else {
-        return;
-    };
-    for e in elements {
-        if let Some(&(_, _, mode)) = modes
-            .iter()
-            .find(|&&(row, col, _)| e.row == Some(row) && e.col == col)
-            && mode != 0
-        {
-            e.interp = mode;
-        }
-    }
-}
-
-/// Each unread arbitrary element takes the interpolation mode of the read
-/// elements packed into its register, if they agree on one (an integer only
-/// a constant one): the validator wants one mode per register, and an input
-/// the program reads per vertex is constant beside neighbours `PSV0` gave
-/// the console's linear mode.
-pub(crate) fn share_row_modes(elements: &mut [SigElement]) {
-    let modes: Vec<Option<u8>> = elements
-        .iter()
-        .map(|e| {
-            let row = e.row?;
-            if e.usage != 0 || e.kind != 0 {
-                return None;
-            }
-            let mut read = elements
-                .iter()
-                .filter(|o| o.row == Some(row) && o.usage != 0)
-                .map(|o| o.interp);
-            let mode = read.next()?;
-            if read.any(|m| m != mode) || (mode != 1 && e.comp != 9) {
-                return None;
-            }
-            Some(mode)
-        })
-        .collect();
-    for (e, mode) in elements.iter_mut().zip(modes) {
-        if let Some(mode) = mode {
-            e.interp = mode;
-        }
-    }
 }
 
 /// The most a mesh shader's outputs may take, in bytes (D3D12).
@@ -458,21 +369,40 @@ pub(crate) fn hash(data: &[u8]) -> [u8; 16] {
 
 fn md5_block(state: &mut [u32; 4], block: &[u8; 64]) {
     const S: [u32; 16] = [7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21];
-    let x: Vec<u32> = block
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|c| u32::from_le_bytes(*c))
-        .collect();
+    const K: [u32; 64] = [
+        0xd76a_a478, 0xe8c7_b756, 0x2420_70db, 0xc1bd_ceee,
+        0xf57c_0faf, 0x4787_c62a, 0xa830_4613, 0xfd46_9501,
+        0x6980_98d8, 0x8b44_f7af, 0xffff_5bb1, 0x895c_d7be,
+        0x6b90_1122, 0xfd98_7193, 0xa679_438e, 0x49b4_0821,
+        0xf61e_2562, 0xc040_b340, 0x265e_5a51, 0xe9b6_c7aa,
+        0xd62f_105d, 0x0244_1453, 0xd8a1_e681, 0xe7d3_fbc8,
+        0x21e1_cde6, 0xc337_07d6, 0xf4d5_0d87, 0x455a_14ed,
+        0xa9e3_e905, 0xfcef_a3f8, 0x676f_02d9, 0x8d2a_4c8a,
+        0xfffa_3942, 0x8771_f681, 0x6d9d_6122, 0xfde5_380c,
+        0xa4be_ea44, 0x4bde_cfa9, 0xf6bb_4b60, 0xbebf_bc70,
+        0x289b_7ec6, 0xeaa1_27fa, 0xd4ef_3085, 0x0488_1d05,
+        0xd9d4_d039, 0xe6db_99e5, 0x1fa2_7cf8, 0xc4ac_5665,
+        0xf429_2244, 0x432a_ff97, 0xab94_23a7, 0xfc93_a039,
+        0x655b_59c3, 0x8f0c_cc92, 0xffef_f47d, 0x8584_5dd1,
+        0x6fa8_7e4f, 0xfe2c_e6e0, 0xa301_4314, 0x4e08_11a1,
+        0xf753_7e82, 0xbd3a_f235, 0x2ad7_d2bb, 0xeb86_d391,
+    ];
+    let x: [u32; 16] = std::array::from_fn(|i| {
+        u32::from_le_bytes([
+            block[4 * i],
+            block[4 * i + 1],
+            block[4 * i + 2],
+            block[4 * i + 3],
+        ])
+    });
     let [mut a, mut b, mut c, mut d] = *state;
-    for i in 0..64 {
+    for (i, &k) in K.iter().enumerate() {
         let (f, g) = match i / 16 {
             0 => ((b & c) | (!b & d), i),
             1 => ((d & b) | (!d & c), (5 * i + 1) % 16),
             2 => (b ^ c ^ d, (3 * i + 5) % 16),
             _ => (c ^ (b | !d), (7 * i) % 16),
         };
-        let k = ((i as f64 + 1.0).sin().abs() * 4_294_967_296.0) as u32;
         let rotated = a
             .wrapping_add(f)
             .wrapping_add(k)
@@ -490,6 +420,60 @@ mod tests {
     use super::*;
 
     #[test]
+    fn packed_vertex_outputs_preserve_name_order_and_declared_interpolation() {
+        let integer = SigElement {
+            name: "TEXCOORD".into(),
+            index: 1,
+            kind: 0,
+            comp: 5,
+            interp: 1,
+            row: Some(0),
+            col: 2,
+            cols: 2,
+            usage: 3,
+            half: false,
+        };
+        let flat_float = SigElement {
+            name: "COLOR".into(),
+            index: 0,
+            comp: 9,
+            col: 0,
+            ..integer.clone()
+        };
+        let smooth_float = SigElement {
+            index: 2,
+            row: Some(1),
+            interp: 2,
+            comp: 9,
+            ..integer.clone()
+        };
+        let outputs = [integer, flat_float, smooth_float];
+        let mut recovered = super::super::signature(&signature(&outputs, false)).unwrap();
+        // DXC orders the row by semantic-name offset even though TEXCOORD
+        // occupies z/w and COLOR occupies x/y.
+        assert_eq!(recovered[0].name, "TEXCOORD");
+        assert_eq!(recovered[1].name, "COLOR");
+        // PSV records can be in a different order again.
+        let psv = psv(&Psv {
+            stage: 1,
+            flag: false,
+            inputs: &[],
+            outputs: &[outputs[2].clone(), outputs[1].clone(), outputs[0].clone()],
+            prims: &[],
+            mesh: None,
+            geometry: None,
+            bindings: &[],
+            threads: [0; 3],
+            wave_size: None,
+        });
+        recovered[1].interp = 2;
+        super::super::vertex_output_interpolation(&psv, &mut recovered).unwrap();
+        assert_eq!(recovered.iter().map(|e| e.interp).collect::<Vec<_>>(), [1, 1, 2]);
+        assert!(super::super::vertex_output_interpolation(&psv[..psv.len() - 1], &mut recovered)
+            .is_err());
+    }
+
+    #[test]
     fn md5_core_matches_the_standard() {
         // Standard MD5 of "abc" with standard padding, through md5_block.
         let mut block = b"abc".to_vec();
@@ -504,108 +488,5 @@ mod tests {
             .map(|b| format!("{b:02x}"))
             .collect();
         assert_eq!(hex, "900150983cd24fb0d6963f7d28e17f72");
-    }
-
-    fn element(name: &str, kind: u8, interp: u8, row: u32, col: u8, cols: u8) -> SigElement {
-        SigElement {
-            name: name.into(),
-            index: 0,
-            kind,
-            comp: 9,
-            interp,
-            row: Some(row),
-            col,
-            cols,
-            usage: (1 << cols) - 1,
-            half: false,
-        }
-    }
-
-    #[test]
-    fn rows_of_one_register_keep_element_order() {
-        // As the console's containers list them: column 3 before column 0.
-        let els = [
-            element("TEXCOORD", 0, 2, 0, 3, 1),
-            element("TANGENT", 0, 2, 0, 0, 3),
-        ];
-        let part = signature(&els, false);
-        let name_offset =
-            |row: usize| u32::from_le_bytes(part[8 + 32 * row + 4..][..4].try_into().unwrap());
-        assert_eq!(name_offset(0), 8 + 64);
-        assert_eq!(part[8 + 24], 0b1000);
-    }
-
-    fn psv_element(interp: u8, comp: u8, row: u32, col: u8, cols: u8) -> SigElement {
-        SigElement {
-            name: "TEXCOORD".into(),
-            index: row,
-            kind: 0,
-            comp,
-            interp,
-            row: Some(row),
-            col,
-            cols,
-            usage: (1 << cols) - 1,
-            half: false,
-        }
-    }
-
-    #[test]
-    fn elements_take_the_modes_psv0_gives_their_register() {
-        // As the console packs them: a constant float beside a constant
-        // uint, which the default table would make linear.
-        let console = [
-            psv_element(2, 9, 1, 0, 4),
-            psv_element(1, 9, 7, 0, 1),
-            psv_element(1, 5, 7, 1, 1),
-        ];
-        let part = psv(&Psv {
-            stage: 1,
-            flag: false,
-            inputs: &[],
-            outputs: &console,
-            prims: &[],
-            mesh: None,
-            geometry: None,
-            bindings: &[],
-            threads: [0; 3],
-            wave_size: None,
-        });
-        let mut ours = console.clone();
-        for e in &mut ours {
-            e.interp = if e.comp == 9 { 2 } else { 1 };
-        }
-        take_modes(&part, 0, &mut ours);
-        assert_eq!(ours[1].interp, 2);
-        take_modes(&part, 1, &mut ours);
-        assert_eq!(ours, console);
-        // A part cut short leaves the modes alone.
-        assert_eq!(psv_modes(&part[..40], 1), None);
-    }
-
-    #[test]
-    fn unread_elements_take_the_mode_read_in_their_register() {
-        // As in PS_RasterizeVehicle*InterfaceDepth: TEXCOORD3 (row 5, w)
-        // read per vertex, so constant, beside an unread linear NORMAL.
-        let mut normal = psv_element(2, 9, 5, 0, 3);
-        normal.usage = 0;
-        // A register read two ways is left alone, and an unread uint never
-        // turns linear.
-        let mut mixed = psv_element(2, 9, 2, 2, 1);
-        mixed.usage = 0;
-        let mut uint = psv_element(1, 5, 3, 2, 1);
-        uint.usage = 0;
-        let mut els = [
-            normal,
-            psv_element(1, 9, 5, 3, 1),
-            psv_element(2, 9, 2, 0, 1),
-            psv_element(1, 9, 2, 1, 1),
-            mixed,
-            psv_element(2, 9, 3, 0, 2),
-            uint,
-        ];
-        share_row_modes(&mut els);
-        let modes: Vec<u8> = els.iter().map(|e| e.interp).collect();
-        assert_eq!(modes, [1, 1, 2, 1, 2, 2, 1]);
     }
 }
