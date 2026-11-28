@@ -236,6 +236,89 @@ Proton 11.0, it restored creation of six refused compute
 pipelines; it does not establish correct gameplay or a frame-rate improvement. See the
 [validation details](docs/fork-notes.md#r-7-large-code-literal-tables-on-nvidia-2026-11-26).
 
+#### DLSS Super Resolution (NVIDIA RTX, experimental, off by default)
+
+DLSS can do the game's upscaling instead of its own FidelityFX upscaler. Nobody has run it on
+this renderer yet and nothing was measured, so treat it as something to try. NVIDIA's files are not part of this
+repository; you download them once yourself:
+
+1. Run `scripts\get-nvidia-dlss.ps1` in PowerShell. It shows what it will get (NVIDIA Streamline
+   from github.com/NVIDIA-RTX/Streamline, about 70 MB) and where it puts it (your Leonida data
+   folder, outside this checkout), asks before downloading, and deletes any file NVIDIA did not
+   sign. `leonida run` with DLSS on also offers this once (Enter alone means no); the game
+   itself never goes online.
+2. Run `leonida dlss-check --device` to see whether the files load and your card offers DLSS.
+3. Turn it on with the `dlss` profile (quality mode):
+
+   ```toml
+   [graphics]
+   profiles = ["dlss"]
+   ```
+
+   or with `LEONIDA_DLSS=quality` (also `balanced`, `performance`, `dlaa` or `off`).
+
+To turn it off, remove `"dlss"` from the `profiles` line (or unset `LEONIDA_DLSS`). Without the
+switch nothing changes and no NVIDIA file is opened. If something is missing (the files, a valid
+NVIDIA signature, DLSS on your card), the game keeps its own upscaling and says why at start. If
+the picture stops updating with DLSS on, close the game and turn it off. See
+[the note](docs/notes/2026-11-27-dlss-super-resolution.md) for details and limits.
+
+#### DLSS Frame Generation (NVIDIA RTX 40 and 50, experimental, off by default)
+
+On an RTX 40 or 50 card DLSS can also show generated frames between the game's own (2x; up to 6x
+on an RTX 50). It needs DLSS upscaling on, and it has not been run in the game by anyone yet.
+Older cards (RTX 20 and 30) don't have it, and the game then says so at start and runs as before.
+
+1. Run `scripts\get-nvidia-dlss.ps1` again if you got the DLSS files before: it now also fetches
+   frame generation's four files.
+2. Run `leonida dlss-check --present` to see whether your card offers it. It opens a window for
+   three seconds and says how many frames frame generation showed.
+3. Turn it on with the `dlss-framegen` profile (DLSS quality mode and frame generation 2x):
+
+   ```toml
+   [graphics]
+   profiles = ["dlss-framegen"]
+   ```
+
+Turn on Windows' hardware-accelerated GPU scheduling first (Settings > System > Display >
+Graphics > Change default graphics settings); frame generation needs it, and the `base`
+profile's `LEONIDA_ASYNC_SUBMIT=1` (or `LEONIDA_THIN=1`). More frames per rendered one:
+`LEONIDA_FRAMEGEN_X=3` (2 to 6), or `F1`, Frame generation, while the game runs. To turn it off, remove `"dlss-framegen"` from the
+`profiles` line. Frame generation holds one frame back, so it feels best when the game already
+runs at 60 fps or more. See [the note](docs/notes/2026-11-27-frame-generation.md).
+
+#### AMD FSR 3 frame generation (other cards with DLSS, experimental, off by default)
+
+On an RTX 20 or 30 card the `dlss-framegen` profile uses AMD FSR 3 frame generation instead (2x
+at most). It also needs DLSS upscaling on, and it has not been run in the game by anyone yet.
+
+1. Run `scripts\get-amd-fsr.ps1` in PowerShell. It shows what it will get (two DLLs of AMD's
+   FidelityFX SDK v2.4.0, from AMD's GitHub, and AMD's licence) and asks first. It checks each
+   file's SHA-256 and AMD's signature and puts them in the data folder, outside this checkout.
+   `leonida run` with the profile on also offers this once (Enter alone means no).
+2. Turn it on with the same `dlss-framegen` profile.
+
+The start shows a `frame gen` line saying which frame generation is used. To use FSR 3 without
+the profile, set `LEONIDA_DLSS=quality` and `LEONIDA_FSR_FRAMEGEN=1`. To turn it off, remove the
+profile, or set `LEONIDA_FSR_FRAMEGEN=0`.
+
+#### MFG Unlocker (someone else's mod, RTX 20 and 30, off by default)
+
+[MFG Unlocker](https://github.com/dashdogy/MFG-Unlocker) is someone else's mod (MIT licence) that
+lets DLSS Frame Generation run on RTX 20 and 30 cards. NVIDIA does not support that, it is not
+part of Leonida Legacy, and nobody has tried it with this game. You can try it if you want:
+
+1. Use the `dlss-framegen` profile as above.
+2. Answer `y` when the start asks `Turn MFG Unlocker on? [y/N]` (asked once, on RTX 20 and 30
+   cards only; Enter alone means no), or turn MFG UNLOCKER on in the Leonida launcher.
+3. The next start downloads it from the mod's own GitHub release (v1.7.2, about 5 MB, checked
+   against the SHA-256 its author published) into `%LOCALAPPDATA%\leonida\mfg-unlocker`, with
+   its licence, and loads it. `scripts\get-mfg-unlocker.ps1` does the download by hand.
+
+If the game crashes or frame generation fails, turn it off: MFG UNLOCKER, OFF in the Leonida
+launcher (or `LEONIDA_MFG_UNLOCKER=0`), and start again. The mod writes its own `RTXMFG-...` files beside
+`leonida.exe`. Details: [the note](docs/notes/2026-11-27-frame-generation.md#mfg-unlocker-someone-elses-mod).
+
 Environment overrides take precedence over TOML settings, which take precedence over profiles. For example,
 an explicit `LEONIDA_QUEUE2=0` still wins. `LEONIDA_PROFILE` overrides the profile list, except the existing
 diagnostics value `1`, which enables the CPU sampler and leaves graphics selection to the config. Run
@@ -303,6 +386,29 @@ Input: XInput pads. With none connected, the keyboard acts as a pad while the ga
 | Q / E, Z / C | shoulders, triggers |
 | F / H | stick clicks |
 | Esc, Tab | Menu, View |
+
+`LEONIDA_KBM_GTA=1` (off by default) lays the keys out like GTA V on PC instead: `Shift` = A,
+`Space` = X, `R` = B, `F` = Y, `Tab` = LB, `Q` = RB, `Ctrl` = L3, `C` = R3, `E` = D-pad right,
+`M` = D-pad up, `Z` = D-pad down, `G` = D-pad left, `V` = View, `P` or `Esc` = Menu (letters by
+their place on the keyboard, as in the table above). With `LEONIDA_MOUSE_CAPTURE=1` the right and
+left mouse buttons are LT and RT. From Belobug/VIctory-Belobug-AMD (pull request #295 by
+zhu1025960209-web).
+
+`LEONIDA_MOUSE_CAPTURE=1` (off by default) keeps the cursor hidden inside the game's window while it
+is in front, so a click never lands on another window or screen, and gives the game a mouse that
+turns the camera; switching to another window or opening `F1` lets the cursor go.
+`LEONIDA_MOUSE_SENS` sets how fast the mouse turns it (`1.0`), `LEONIDA_MOUSE_INVERT_Y=1` turns up
+and down round. From trustno1-coder/VIctory-NVIDIA (06afe63, e68f48a).
+
+`F1` opens the settings menu while the game runs. It shows only what applies at once: Display (fps
+on screen, the performance panel, a frame-rate cap), Frame generation (its amount), Picture and
+Controls (the GTA V keys, mouse speed, invert Y, mouse capture).
+`Q` / `E` change tab, the arrows or `W` / `S` move, the arrows or `A` / `D` change a value, `Enter` or a click moves
+it on, `Esc` or `F1` closes. While it is open the game gets no keyboard or mouse. A change applies at once and is
+saved to `%LOCALAPPDATA%\leonida\settings\switches.json`, which the next start reads (a variable you set by hand
+still wins). Settings that need a restart are in the Leonida launcher. `F3` shows a performance panel
+(`LEONIDA_PANEL=1` from the start). `LEONIDA_MENU=0` leaves `F1` and `F3` to the game;
+`LEONIDA_SAVED_SETTINGS=0` ignores the saved file. Details: `docs/notes/2026-11-27-frame-generation.md`.
 
 ### Testing the optional one-record clamp
 
@@ -384,6 +490,22 @@ the code (`leonida.toml` and `%LOCALAPPDATA%\leonida`), so updating keeps them.
   ([victory-amd](https://github.com/myokex/victory-amd), commit `c6dc4d8`), which adapts pull request #115 by
   Spexivus, its correction by joroyt and a part of VIctory #1122 by tightfall. The read-beside fix for kernel reads
   into title memory is by **Joshua Odom** (commit `10ea38e` of the same fork family).
+- DLSS Super Resolution is ported from
+  **[trustno1-coder/VIctory-NVIDIA](https://github.com/trustno1-coder/VIctory-NVIDIA)** (commit `959dcaf`):
+  the Streamline bindings and the DLSS path are work of **readmet3xt-lab** (commit `fc8b9ca`), and the
+  FidelityFX upscaler path, its renderer sites and the host work in the title's command list come from
+  **DexNom**'s fork ([DexNom/VIctory](https://github.com/DexNom/VIctory)). DLSS Frame Generation is ported
+  from the same fork: the proxies and present path (`fc8b9ca`), the colour without the interface (`1d0fa87`)
+  and the frame timing line (`8a93538`) by **readmet3xt-lab**, 2x to 6x and the check's teardown (`22c6be2`)
+  by **trustno1-coder**. NVIDIA DLSS and Streamline are NVIDIA's; their files are downloaded by the user and
+  are not part of this repository.
+- On the local branch `feat/nvidia-base` the gpu, shader, hle and formats crates are those of
+  **[trustno1-coder/VIctory-NVIDIA](https://github.com/trustno1-coder/VIctory-NVIDIA)** (`df2daaf` to
+  `63b902f`), whose renderer comes from **codec-d**'s cool_fox (`f4b48ad`) and whose history runs through
+  **[readmet3xt-lab/foxhound](https://github.com/readmet3xt-lab/foxhound)**; the memory stack there is by
+  **skornuta** (victory-memory-stack `57fb136`) and the PS4 pads by **FrancescoGelosoEterea** (VIscosity
+  `d8db7a0`). [MFG Unlocker](https://github.com/dashdogy/MFG-Unlocker) is by **dashdogy** (MIT); it is not
+  part of this repository.
 - Logo: ["Grand Theft Auto VI" icon by SlyDevil](https://www.steamgriddb.com/icon/122618) on SteamGridDB.
 - The victory-gta6 changes were developed with [Claude Code](https://claude.com/claude-code).
 
