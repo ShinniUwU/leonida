@@ -2,7 +2,8 @@
 //! Streamline, loaded at run time from a folder of the user's; both off by
 //! default.
 //!
-//! - `LEONIDA_DLSS=1`: the title's FidelityFX upscaling (its `ffxDispatch`,
+//! - `LEONIDA_DLSS=1` (or a mode's name, [`plan::dlss_switch`]): the title's
+//!   FidelityFX upscaling (its `ffxDispatch`,
 //!   served by `leonida_hle::modules::fidelityfx`) is done by DLSS instead,
 //!   from the same colour, depth, motion vectors, exposure and reactive mask
 //!   into the same output, at the same place of the title's command list.
@@ -17,7 +18,12 @@
 //!   the latency markers Frame Generation needs (Reflex on). Needs the line
 //!   of submissions (`LEONIDA_THIN=1` or `LEONIDA_ASYNC_SUBMIT=1`).
 //! - `LEONIDA_STREAMLINE_DIR`: the folder of `sl.interposer.dll`, its plugins
-//!   and NGX's DLLs (default [`DEFAULT_DIR`]).
+//!   and NGX's DLLs (default the data folder's [`SUBDIR`], which
+//!   `scripts\get-nvidia-dlss.ps1` fills, see [`set_data_dir`]).
+//!
+//! Every NVIDIA file of the folder is checked to be signed by NVIDIA, and
+//! AMD's by AMD ([`Signer`]), before anything is loaded; they load from
+//! their own folder and System32 only.
 //!
 //! Anything missing (the folder, a signature, a feature on this GPU, the
 //! device hand-over) leaves the title's own upscaling and our plain present
@@ -46,9 +52,50 @@ use windows::core::Interface;
 
 use crate::object::Object;
 
-/// Where `sl.interposer.dll` is looked for without `LEONIDA_STREAMLINE_DIR`.
+/// Where `sl.interposer.dll` is looked for without `LEONIDA_STREAMLINE_DIR`
+/// and without a data folder ([`set_data_dir`]).
 pub const DEFAULT_DIR: &str = r"C:\dev\sdk\streamline-sdk-v2.14.16\bin\x64";
-const INTERPOSER: &str = "sl.interposer.dll";
+/// Where `sl.interposer.dll` and its plugins are looked for under the data
+/// folder without `LEONIDA_STREAMLINE_DIR` (`scripts/get-nvidia-dlss.ps1`
+/// puts them there).
+pub const SUBDIR: &str = r"nvidia\streamline-v2.14.16\bin\x64";
+/// Streamline's entry point, the file that says the folder is filled.
+pub const INTERPOSER: &str = "sl.interposer.dll";
+/// The files of the folder that must be signed by NVIDIA before anything
+/// is loaded (the ones `scripts/get-nvidia-dlss.ps1` fetches), if there.
+const SIGNED: [&str; 8] = [
+    INTERPOSER,
+    "sl.common.dll",
+    "sl.dlss.dll",
+    "nvngx_dlss.dll",
+    "sl.dlss_g.dll",
+    "nvngx_dlssg.dll",
+    "sl.reflex.dll",
+    "sl.pcl.dll",
+];
+/// Where AMD's FSR 3 frame generation DLLs are looked for under the data
+/// folder without `LEONIDA_FIDELITYFX_DIR` (`scripts/get-amd-fsr.ps1` puts
+/// them there).
+pub const FIDELITYFX_SUBDIR: &str = r"amd\fidelityfx-v2.4.0";
+/// The two AMD files FSR 3 frame generation loads, both signed by AMD.
+pub const FIDELITYFX_FILES: [&str; 2] =
+    ["amd_fidelityfx_loader_dx12.dll", "amd_fidelityfx_framegeneration_dx12.dll"];
+
+/// The data folder ([`set_data_dir`]).
+static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// The folders without `LEONIDA_STREAMLINE_DIR` and `LEONIDA_FIDELITYFX_DIR`
+/// are `dir`'s [`SUBDIR`] and [`FIDELITYFX_SUBDIR`], where the download
+/// scripts put the files (`leonida_core::Config::data_dir`). Set once by the
+/// app, before [`Asked::from_env`].
+pub fn set_data_dir(dir: &Path) {
+    let _ = DATA_DIR.set(dir.to_path_buf());
+}
+
+/// `sub` in the data folder, once one is set.
+fn data_subdir(sub: &str) -> Option<PathBuf> {
+    DATA_DIR.get().map(|dir| dir.join(sub))
+}
 /// The project id NGX is given (engine "custom", no NVIDIA application id).
 const PROJECT_ID: &CStr = c"6f0d7b2e-3a41-4c1e-9b57-2d8e4f1a9c30";
 const ENGINE_VERSION: &CStr = c"Leonida Legacy 0.1";
@@ -98,13 +145,15 @@ impl Asked {
         let on = |name: &str| var(name).is_some_and(|v| v.trim() == "1");
         let framegen = on("LEONIDA_FRAMEGEN");
         let fsr_framegen = fsr::asked_from_env();
-        let mode = match var("LEONIDA_DLSS_MODE") {
-            Some(name) => Mode::from_name(&name).ok_or_else(|| {
+        let (dlss, dlss_mode) = plan::dlss_switch(var("LEONIDA_DLSS").as_deref())?;
+        let mode = match (var("LEONIDA_DLSS_MODE"), dlss_mode) {
+            (Some(name), _) => Mode::from_name(&name).ok_or_else(|| {
                 format!("LEONIDA_DLSS_MODE={name}: not one of dlaa, quality, balanced, performance, ultraperformance")
             })?,
+            (None, Some(mode)) => mode,
             // Frame generation alone keeps the scene at the output's size.
-            None if (framegen || fsr_framegen) && !on("LEONIDA_DLSS") => Mode::Dlaa,
-            None => Mode::Quality,
+            (None, None) if (framegen || fsr_framegen) && !dlss => Mode::Dlaa,
+            (None, None) => Mode::Quality,
         };
         let preset = match var("LEONIDA_DLSS_PRESET") {
             Some(name) => plan::preset(&name)
@@ -112,11 +161,15 @@ impl Asked {
             None => 0,
         };
         Ok(Asked {
-            dlss: on("LEONIDA_DLSS"),
+            dlss,
             framegen,
             mode,
             preset,
-            dir: var("LEONIDA_STREAMLINE_DIR").map_or_else(|| PathBuf::from(DEFAULT_DIR), PathBuf::from),
+            dir: var("LEONIDA_STREAMLINE_DIR")
+                .filter(|v| !v.trim().is_empty())
+                .map(PathBuf::from)
+                .or_else(|| data_subdir(SUBDIR))
+                .unwrap_or_else(|| PathBuf::from(DEFAULT_DIR)),
             jitter: plan::pair(var("LEONIDA_DLSS_JITTER").as_deref()),
             mvec: plan::pair(var("LEONIDA_DLSS_MV").as_deref()),
             reactive: var("LEONIDA_DLSS_REACTIVE").is_none_or(|v| v.trim() != "0"),
@@ -514,9 +567,17 @@ fn notice_of(f: &Facts, dlss_live: bool, fsr_live: bool) -> Vec<String> {
 fn load_and_init(asked: &Asked, require_line: bool) -> Result<Available, String> {
     let path = std::path::absolute(asked.dir.join(INTERPOSER)).map_err(|e| e.to_string())?;
     if !path.is_file() {
-        return Err(format!("no {INTERPOSER} in that folder (LEONIDA_STREAMLINE_DIR)"));
+        return Err(format!(
+            "no {INTERPOSER} in that folder (run scripts\\get-nvidia-dlss.ps1, or set \
+             LEONIDA_STREAMLINE_DIR)"
+        ));
     }
-    verify_signature(&path)?;
+    for name in SIGNED {
+        let file = path.with_file_name(name);
+        if name == INTERPOSER || file.is_file() {
+            verify_signature(&file, Signer::Nvidia)?;
+        }
+    }
     let sl = load(&path)?;
     let sl = SL.get_or_init(|| sl);
     let dir_wide: Vec<u16> = wide(&asked.dir);
@@ -764,7 +825,41 @@ pub fn d3d12_core_path() -> Option<PathBuf> {
 
 /// The Authenticode signature of `path` (NVIDIA signs its DLLs), checked
 /// without going online.
-fn verify_signature(path: &Path) -> Result<(), String> {
+/// Whose signature a DLL loaded here must carry.
+#[derive(Clone, Copy, Debug)]
+enum Signer {
+    /// Streamline and DLSS.
+    Nvidia,
+    /// FidelityFX (FSR 3 frame generation).
+    Amd,
+}
+
+impl Signer {
+    fn name(self) -> &'static str {
+        match self {
+            Signer::Nvidia => "NVIDIA",
+            Signer::Amd => "AMD",
+        }
+    }
+
+    /// Whether a certificate's display name is this company's
+    /// ("NVIDIA Corporation", "Advanced Micro Devices, Inc.").
+    fn signed(self, name: &str) -> bool {
+        let name = name.to_ascii_uppercase();
+        match self {
+            Signer::Nvidia => name.contains("NVIDIA"),
+            Signer::Amd => {
+                name.contains("ADVANCED MICRO DEVICES")
+                    || name.split(|c: char| !c.is_ascii_alphanumeric()).any(|w| w == "AMD")
+            }
+        }
+    }
+}
+
+/// The Authenticode signature of `path`, checked without going online (no
+/// revocation check, and only what is cached): valid, and its signer's
+/// name is `by`'s, as the download scripts check.
+fn verify_signature(path: &Path, by: Signer) -> Result<(), String> {
     use windows_sys::Win32::Security::WinTrust::*;
     let file = wide(path);
     let mut info = WINTRUST_FILE_INFO {
@@ -786,14 +881,120 @@ fn verify_signature(path: &Path) -> Result<(), String> {
     let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
     // SAFETY: filled structures that live through both calls.
     let code = unsafe { WinVerifyTrust(std::ptr::null_mut(), &mut action, (&raw mut data).cast()) };
+    let name = if code == 0 { signer(data.hWVTStateData) } else { None };
     data.dwStateAction = WTD_STATEACTION_CLOSE;
     // SAFETY: as above; closes the state the first call opened.
     unsafe { WinVerifyTrust(std::ptr::null_mut(), &mut action, (&raw mut data).cast()) };
-    if code == 0 {
-        Ok(())
-    } else {
-        Err(format!("{} is not validly signed ({:#x})", path.display(), code as u32))
+    if code != 0 {
+        return Err(format!("{} is not validly signed ({:#x})", path.display(), code as u32));
     }
+    match name {
+        Some(name) if by.signed(&name) => Ok(()),
+        name => Err(format!(
+            "{} is signed by {}, not {}",
+            path.display(),
+            name.as_deref().unwrap_or("an unknown signer"),
+            by.name()
+        )),
+    }
+}
+
+/// The display name of the first signer of a file WinVerifyTrust has just
+/// verified, from its still open `state`.
+fn signer(state: windows_sys::Win32::Foundation::HANDLE) -> Option<String> {
+    use windows_sys::Win32::Security::Cryptography::*;
+    use windows_sys::Win32::Security::WinTrust::*;
+    let mut name = [0u16; 256];
+    // SAFETY: `state` is open from a successful verification; the provider
+    // data, signer and certificate it gives live until it is closed, and
+    // each is checked for null before use.
+    let len = unsafe {
+        let data = WTHelperProvDataFromStateData(state);
+        if data.is_null() {
+            return None;
+        }
+        let signer = WTHelperGetProvSignerFromChain(data, 0, 0, 0);
+        if signer.is_null() {
+            return None;
+        }
+        let cert = WTHelperGetProvCertFromChain(signer, 0);
+        if cert.is_null() || (*cert).pCert.is_null() {
+            return None;
+        }
+        let (kind, out, room) = (CERT_NAME_SIMPLE_DISPLAY_TYPE, name.as_mut_ptr(), 256);
+        CertGetNameStringW((*cert).pCert, kind, 0, std::ptr::null(), out, room)
+    };
+    (len > 1).then(|| String::from_utf16_lossy(&name[..len as usize - 1]))
+}
+
+/// Loads a mod's DLL into this process for good, named `what` in the log,
+/// once its SHA-256 is `sha256`: MFG Unlocker wraps NVIDIA's frame
+/// generation, so it comes before a device is made or Streamline loaded.
+/// The file stays open without write sharing from the check to the load, so
+/// what loads is what was checked. Ported from trustno1-coder/VIctory-NVIDIA
+/// (0cef07e, `load_mod`), which loads it without checking it again.
+pub fn load_mod(what: &str, path: &Path, sha256: &[u8; 32]) -> Result<(), String> {
+    use std::io::Read;
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::System::LibraryLoader::{
+        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
+    };
+    const FILE_SHARE_READ: u32 = 1;
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(path)
+        .map_err(|e| format!("{} could not be opened ({e})", path.display()))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|e| format!("{} could not be read ({e})", path.display()))?;
+    let hash = sha256_of(&bytes)?;
+    if &hash != sha256 {
+        let hex: String = hash.iter().map(|b| format!("{b:02X}")).collect();
+        tracing::warn!(dll = %path.display(), sha256 = hex, "{what}: not the file checked");
+        return Err(format!(
+            "{} is not the file the download checked (SHA-256 {hex})",
+            path.display()
+        ));
+    }
+    let name = wide(path);
+    // Its own folder and System32 only, never the current folder.
+    let flags = LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32;
+    // SAFETY: a NUL-terminated full path; the module stays loaded for the
+    // life of the process.
+    let module = unsafe { LoadLibraryExW(name.as_ptr(), std::ptr::null_mut(), flags) };
+    drop(file);
+    if module.is_null() {
+        let why = std::io::Error::last_os_error();
+        tracing::warn!(dll = %path.display(), "{what}: did not load ({why})");
+        return Err(format!("{} did not load ({why})", path.display()));
+    }
+    tracing::info!(dll = %path.display(), "{what}: loaded");
+    Ok(())
+}
+
+/// The SHA-256 of `bytes`, from Windows' own implementation.
+fn sha256_of(bytes: &[u8]) -> Result<[u8; 32], String> {
+    use windows_sys::Win32::Security::Cryptography::{BCRYPT_SHA256_ALG_HANDLE, BCryptHash};
+    let len = u32::try_from(bytes.len()).map_err(|_| "the file is too large".to_owned())?;
+    let mut out = [0u8; 32];
+    // SAFETY: input and output buffers of the sizes given; the algorithm's
+    // pseudo-handle needs no opening or closing.
+    let status = unsafe {
+        BCryptHash(
+            BCRYPT_SHA256_ALG_HANDLE,
+            std::ptr::null(),
+            0,
+            bytes.as_ptr(),
+            len,
+            out.as_mut_ptr(),
+            out.len() as u32,
+        )
+    };
+    if status != 0 {
+        return Err(format!("SHA-256 failed ({status:#x})"));
+    }
+    Ok(out)
 }
 
 fn load(path: &Path) -> Result<Sl, String> {
@@ -2320,5 +2521,39 @@ mod failing_tests {
         assert!(!dlss_failing(89, 89));
         assert!(!dlss_failing(120, 1000));
         assert!(!dlss_failing(500, 600));
+    }
+}
+
+#[cfg(test)]
+mod signer_tests {
+    use super::*;
+
+    /// The signer names the download scripts and the loader accept.
+    #[test]
+    fn signers_by_name() {
+        assert!(Signer::Nvidia.signed("NVIDIA Corporation"));
+        assert!(!Signer::Nvidia.signed("Advanced Micro Devices, Inc."));
+        for name in ["Advanced Micro Devices, Inc.", "ADVANCED MICRO DEVICES INC", "AMD Inc."] {
+            assert!(Signer::Amd.signed(name), "{name}");
+        }
+        for name in ["NVIDIA Corporation", "Amdocs Ltd", "Microsoft Corporation", ""] {
+            assert!(!Signer::Amd.signed(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn sha256_is_the_standard_one() {
+        let hash = sha256_of(b"abc").unwrap();
+        let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+
+    #[test]
+    fn a_mod_that_is_not_the_one_checked_is_not_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let dll = dir.path().join("stand-in.dll");
+        std::fs::write(&dll, b"not a library").unwrap();
+        let why = load_mod("a test", &dll, &[0; 32]).unwrap_err();
+        assert!(why.contains("not the file the download checked"), "{why}");
     }
 }

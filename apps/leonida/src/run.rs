@@ -34,8 +34,9 @@ fn run_title(
     leonida_hle::modules::lifecycle::wait_for_previous();
     let cfg = leonida_core::Config::load()?;
     crate::graphics::initialize(&cfg)?;
+    let upscaler = start_dlss(&cfg, &console)?;
     let original = std::fs::read(exe).with_context(|| format!("reading {}", exe.display()))?;
-    let prepared = leonida_loader::prepare(&original)?;
+    let mut prepared = leonida_loader::prepare(&original)?;
     let hash = prepared.original_hash.to_hex();
     match leonida_game::identify(&hash) {
         Some(build) => println!("build          {} ({hash})", build.label),
@@ -43,8 +44,24 @@ fn run_title(
     }
 
     let images = cfg.cache_subdir("images")?;
+    // The patched program goes to a folder of its own, beside the stock one.
+    let patched = upscaler.map(|mode| (mode, crate::upscaler_path::patch(&mut prepared, mode)));
+    let exe_images = match patched {
+        Some((mode, Ok(()))) => {
+            println!(
+                "upscaler path  scene at {} of the output, through the title's FidelityFX",
+                mode.scale()
+            );
+            cfg.cache_subdir(&format!("images/upscaler-{}", mode.name()))?
+        }
+        Some((_, Err(e))) => {
+            println!("upscaler path  not patched in: {e:#}");
+            images.clone()
+        }
+        None => images.clone(),
+    };
     leonida_hle::modules::d3d12x::use_shader_cache(cfg.cache_subdir("shaders")?);
-    let image = leonida_loader::load(&prepared, &images)?;
+    let image = leonida_loader::load(&prepared, &exe_images)?;
     // The program is mapped from the copy `load` wrote: the file's bytes
     // and their patched copy are not read again, and were held for the
     // whole run (two blocks of 114.7 MB each for the title, in
@@ -139,7 +156,10 @@ fn run_title(
         show(name, dll.bind_imports(&with_dlls, policy)?);
     }
     let exe_name = exe.file_name().unwrap_or_default().to_string_lossy();
-    show(&exe_name, image.bind_imports(&with_dlls, policy)?);
+    // With DLSS or frame generation on, the program's FidelityFX imports go
+    // through ours (bound as before otherwise).
+    let interposed = leonida_hle::modules::fidelityfx::Interpose { inner: &with_dlls };
+    show(&exe_name, image.bind_imports(&interposed, policy)?);
     if !execute {
         println!("not executing (pass --execute to start the title)");
         return Ok(());
@@ -313,6 +333,75 @@ fn explain_commit_limit(error: anyhow::Error) -> anyhow::Error {
          system settings > Performance Settings > Advanced > Virtual memory > Change, and pick \
          'System managed size' or a custom size of at least 32 GB. Restart Windows and try again.",
     )
+}
+
+/// DLSS (`LEONIDA_DLSS`, off by default) and its frame generation
+/// (`LEONIDA_FRAMEGEN`, and AMD FSR 3's with `LEONIDA_FSR_FRAMEGEN`, both
+/// off by default and only with DLSS): Streamline from the data folder
+/// `scripts\get-nvidia-dlss.ps1` fills (or `LEONIDA_STREAMLINE_DIR`) and
+/// FidelityFX from the one `scripts\get-amd-fsr.ps1` fills (or
+/// `LEONIDA_FIDELITYFX_DIR`), before anything of the title or the host GPU,
+/// after the one-time questions (`crate::offer`) and MFG Unlocker where it
+/// is on (`crate::mfg`). Fails soft. The scale to patch the title's scene to
+/// where one of them runs: the title then renders through its FidelityFX
+/// path, which they take over (as trustno1-coder/VIctory-NVIDIA's run.rs).
+#[cfg(windows)]
+fn start_dlss(
+    cfg: &leonida_core::Config,
+    console: &Console,
+) -> Result<Option<leonida_hle::streamline::Mode>> {
+    use leonida_hle::streamline;
+    streamline::set_data_dir(&cfg.data_dir);
+    let mut asked = streamline::Asked::from_env().map_err(anyhow::Error::msg)?;
+    asked.series_s = matches!(console, Console::SeriesS);
+    if !asked.dlss {
+        let framegens = [
+            (&mut asked.framegen, "LEONIDA_FRAMEGEN"),
+            (&mut asked.fsr_framegen, "LEONIDA_FSR_FRAMEGEN"),
+        ];
+        for (on, name) in framegens {
+            if std::mem::take(on) {
+                println!(
+                    "frame gen      off: {name}=1 needs DLSS too (LEONIDA_DLSS=quality, or \
+                     the dlss-framegen profile)"
+                );
+            }
+        }
+    }
+    if asked.any() {
+        leonida_core::ensure_outside_repo(&asked.dir)?;
+        if asked.fsr_framegen {
+            leonida_core::ensure_outside_repo(&asked.fidelityfx_dir)?;
+        }
+        if let Some(log) = &asked.log_dir {
+            leonida_core::ensure_outside_repo(log)?;
+        }
+        crate::offer::dlss(cfg, &asked);
+        crate::offer::fsr(cfg, &asked);
+        // MFG Unlocker (LEONIDA_MFG_UNLOCKER, off by default) wraps NVIDIA's
+        // frame generation: in before Streamline loads or a device is made.
+        crate::mfg::start(&asked);
+    }
+    let available = streamline::init(&asked);
+    for (i, line) in streamline::notice().iter().enumerate() {
+        println!("{}{line}", if i == 0 { "frame gen      " } else { "               " });
+    }
+    if asked.any() {
+        let state = |on: bool, wanted: bool| match (on, wanted) {
+            (true, _) => "on",
+            (false, true) => "asked, not available (see the log, or `leonida dlss-check`)",
+            (false, false) => "off",
+        };
+        let framegen = available.framegen || available.fsr_framegen;
+        println!(
+            "upscaling      DLSS {} ({}), frame generation {}",
+            state(available.dlss, asked.dlss),
+            asked.mode.name(),
+            state(framegen, asked.framegen || asked.fsr_framegen)
+        );
+    }
+    let runs = available.dlss || available.framegen || available.fsr_framegen;
+    Ok(runs.then_some(asked.mode))
 }
 
 /// Title DLLs the title loads itself (`LoadLibrary`) that nothing imports,

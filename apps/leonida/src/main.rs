@@ -7,10 +7,16 @@ mod census;
 mod find;
 mod graphics;
 mod inspect;
+#[cfg(windows)]
+mod mfg;
+#[cfg(windows)]
+mod offer;
 mod play;
 mod run;
 mod shader;
 mod translate;
+#[cfg(windows)]
+mod upscaler_path;
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -138,6 +144,22 @@ enum Command {
         #[arg(last = true)]
         title_args: Vec<String>,
     },
+    /// Check DLSS on this PC without the title: Streamline loads (from the
+    /// folder scripts\get-nvidia-dlss.ps1 fills, or LEONIDA_STREAMLINE_DIR)
+    /// and says whether this graphics card supports DLSS and DLSS Frame
+    /// Generation. Mode from LEONIDA_DLSS (quality if unset).
+    DlssCheck {
+        /// The output size DLSS upscales to.
+        #[arg(long, default_value = "3840x2160", value_parser = parse_size)]
+        output: [u32; 2],
+        /// Also make the host device and run DLSS on stand-in textures.
+        #[arg(long)]
+        device: bool,
+        /// Also present for three seconds in a window with frame generation
+        /// on (implies --device).
+        #[arg(long)]
+        present: bool,
+    },
     /// Show the resolved configuration and check it.
     Config {
         /// First save this folder as the game folder in leonida.toml.
@@ -243,6 +265,9 @@ fn main() -> Result<()> {
             };
             run::run(&exe, unimplemented, strict, execute, console)
         }
+        Command::DlssCheck { output, device, present } => {
+            dlss_check(output, device || present, present)
+        }
         Command::Config {
             game_dir,
             graphics,
@@ -265,6 +290,39 @@ fn main() -> Result<()> {
             show_config()
         }
     }
+}
+
+/// `WIDTHxHEIGHT`, both above zero.
+fn parse_size(text: &str) -> Result<[u32; 2], String> {
+    let wrong = || format!("{text}: expected WIDTHxHEIGHT, e.g. 3840x2160");
+    let (w, h) = text.split_once(['x', 'X']).ok_or_else(wrong)?;
+    let size = [w.trim().parse().map_err(|_| wrong())?, h.trim().parse().map_err(|_| wrong())?];
+    if size.contains(&0) {
+        return Err(wrong());
+    }
+    Ok(size)
+}
+
+#[cfg(windows)]
+fn dlss_check(output: [u32; 2], device: bool, present: bool) -> Result<()> {
+    use leonida_hle::streamline;
+    let cfg = leonida_core::Config::load()?;
+    graphics::initialize(&cfg)?;
+    streamline::set_data_dir(&cfg.data_dir);
+    let asked = streamline::Asked::from_env().map_err(anyhow::Error::msg)?;
+    leonida_core::ensure_outside_repo(&asked.dir)?;
+    if let Some(log) = &asked.log_dir {
+        leonida_core::ensure_outside_repo(log)?;
+    }
+    for line in streamline::check(output, device, present) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn dlss_check(_: [u32; 2], _: bool, _: bool) -> Result<()> {
+    anyhow::bail!("DLSS needs Windows")
 }
 
 /// The executable the game folder's MicrosoftGame.config names. With no
@@ -426,7 +484,7 @@ pub(crate) fn default_paths(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
 mod tests {
     use clap::{CommandFactory, Parser};
 
-    use super::{Cli, Command, manifest_exe, version_text};
+    use super::{Cli, Command, manifest_exe, parse_size, version_text};
 
     #[test]
     fn the_command_line_is_consistent() {
@@ -460,6 +518,15 @@ mod tests {
             .collect();
         assert_eq!(keys, ["version", "build", "commit"]);
         assert!(text.lines().all(|l| !l.ends_with('=')), "{text}");
+    }
+
+    #[test]
+    fn dlss_check_sizes() {
+        assert_eq!(parse_size("3840x2160"), Ok([3840, 2160]));
+        assert_eq!(parse_size("2560X1440"), Ok([2560, 1440]));
+        for wrong in ["", "3840", "0x2160", "3840x", "ax b"] {
+            assert!(parse_size(wrong).is_err(), "{wrong}");
+        }
     }
 
     #[test]

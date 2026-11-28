@@ -10,7 +10,8 @@
 //!   Generation is used where it runs, this where it does not; never both.
 //! - `LEONIDA_FIDELITYFX_DIR`: the folder of `amd_fidelityfx_loader_dx12.dll`
 //!   and `amd_fidelityfx_framegeneration_dx12.dll` (AMD's signed DLLs of the
-//!   FidelityFX SDK's `bin`; default: a `fidelityfx` folder beside our exe).
+//!   FidelityFX SDK's `bin`; default: the data folder's
+//!   `amd\fidelityfx-v2.4.0`, which `scripts\get-amd-fsr.ps1` fills).
 //!
 //! Anything missing (the folder, a signature, the swap chain) leaves our plain
 //! present as it was, with a warning in the log. Like DLSS Frame Generation,
@@ -303,10 +304,13 @@ pub(crate) fn asked_from_env() -> bool {
     std::env::var("LEONIDA_FSR_FRAMEGEN").is_ok_and(|v| v.trim() == "1")
 }
 
-/// `LEONIDA_FIDELITYFX_DIR`, or a `fidelityfx` folder beside our exe.
+/// `LEONIDA_FIDELITYFX_DIR`, or the data folder's
+/// [`super::FIDELITYFX_SUBDIR`] (`super::set_data_dir`), or a `fidelityfx`
+/// folder beside our exe.
 pub(crate) fn dir_from_env() -> PathBuf {
-    match std::env::var_os("LEONIDA_FIDELITYFX_DIR").filter(|v| !v.is_empty()) {
-        Some(dir) => PathBuf::from(dir),
+    let set = std::env::var_os("LEONIDA_FIDELITYFX_DIR").filter(|v| !v.is_empty());
+    match set.map(PathBuf::from).or_else(|| super::data_subdir(super::FIDELITYFX_SUBDIR)) {
+        Some(dir) => dir,
         None => std::env::current_exe()
             .ok()
             .and_then(|exe| exe.parent().map(|d| d.join("fidelityfx")))
@@ -338,7 +342,7 @@ fn load(dir: &Path) -> Result<Ffx, String> {
         if !path.is_file() {
             return Err(format!("{} is missing", path.display()));
         }
-        super::verify_signature(&path)?;
+        super::verify_signature(&path, super::Signer::Amd)?;
         let file = super::wide(&path);
         // Its own folder and System32 only, never the current folder.
         // SAFETY: a NUL-terminated full path.

@@ -94,6 +94,26 @@ pub fn preset(name: &str) -> Option<u32> {
     })
 }
 
+/// `LEONIDA_DLSS`: whether DLSS is on, and at which mode where the value
+/// names one (as the F1 menu, the launcher and the profiles write it).
+/// Unset, empty, `0` and `off` are off; `1` is on at `LEONIDA_DLSS_MODE`'s
+/// mode (quality without it).
+pub fn dlss_switch(value: Option<&str>) -> Result<(bool, Option<Mode>), String> {
+    let value = value.unwrap_or_default().trim();
+    if value.is_empty() || value == "0" || value.eq_ignore_ascii_case("off") {
+        return Ok((false, None));
+    }
+    if value == "1" {
+        return Ok((true, None));
+    }
+    Mode::from_name(value).map(|mode| (true, Some(mode))).ok_or_else(|| {
+        format!(
+            "LEONIDA_DLSS={value}: not one of off, 1, dlaa, quality, balanced, performance, \
+             ultraperformance"
+        )
+    })
+}
+
 /// The name of a `sl::DLSSMode`.
 pub fn sl_mode_name(mode: u32) -> &'static str {
     match mode {
@@ -343,6 +363,18 @@ pub fn pair(value: Option<&str>) -> [f32; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_dlss_switch_takes_a_mode_name() {
+        for off in [None, Some(""), Some("0"), Some("off"), Some(" OFF ")] {
+            assert_eq!(dlss_switch(off), Ok((false, None)), "{off:?}");
+        }
+        assert_eq!(dlss_switch(Some("1")), Ok((true, None)));
+        assert_eq!(dlss_switch(Some("quality")), Ok((true, Some(Mode::Quality))));
+        assert_eq!(dlss_switch(Some("Balanced")), Ok((true, Some(Mode::Balanced))));
+        assert_eq!(dlss_switch(Some("dlaa")), Ok((true, Some(Mode::Dlaa))));
+        assert!(dlss_switch(Some("on")).is_err());
+    }
 
     /// DLSS's optimal render sizes for a 2560x1440 output, as the 310 SDK
     /// reports them (ultra quality has none).
