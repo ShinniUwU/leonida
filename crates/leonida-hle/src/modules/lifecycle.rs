@@ -16,6 +16,7 @@ use std::time::Duration;
 use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_MENU};
 use windows_sys::Win32::UI::WindowsAndMessaging::{self as wm, HMENU};
 use windows_sys::core::{PCSTR, PCWSTR, w};
 
@@ -158,11 +159,16 @@ static TOP_WINDOW: AtomicUsize = AtomicUsize::new(0);
 /// Whether the capture was wanted at the input poll before.
 static CAPTURE_WANTED: AtomicBool = AtomicBool::new(false);
 
-/// `LEONIDA_MOUSE_CAPTURE` is on (live: the F1 menu turns it on and off) and
-/// the F1 menu is shut: while it is open the cursor is free for it.
+/// `LEONIDA_MOUSE_CAPTURE` is on (live: the F1 menu turns it on and off), the
+/// F1 menu is shut (while it is open the cursor is free for it) and Alt is
+/// not held: holding Alt frees the cursor, for the close button, the taskbar
+/// or another window.
 fn capture_wanted() -> bool {
+    // SAFETY: plain query.
+    let alt = unsafe { GetAsyncKeyState(i32::from(VK_MENU)) } < 0;
     leonida_core::switches::live_flag("LEONIDA_MOUSE_CAPTURE")
         && !leonida_gpu::SETTINGS_MENU_OPEN.load(Ordering::Relaxed)
+        && !alt
 }
 
 /// The message that has the window's own thread take or let go of the
@@ -233,7 +239,9 @@ pub(super) fn captured_mouse_delta() -> Option<(i64, i64)> {
         let mut point = POINT::default();
         if wm::GetCursorPos(&mut point) == 0 { state.reference = None; return None; }
         let point = (point.x, point.y);
-        let warp = std::env::var_os("LEONIDA_MOUSE_WARP").is_some_and(|v| v == "1");
+        // Back to the middle every sample: clipped, the cursor stops at the
+        // window's edge and the camera with it. `LEONIDA_MOUSE_WARP=0` keeps it.
+        let warp = !std::env::var_os("LEONIDA_MOUSE_WARP").is_some_and(|v| v == "0");
         let warped = (warp && wm::SetCursorPos(state.center.0, state.center.1) != 0)
             .then_some(state.center);
         Some(mouse_motion(&mut state.reference, point, warped))

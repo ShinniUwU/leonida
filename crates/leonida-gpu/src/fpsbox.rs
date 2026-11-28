@@ -55,13 +55,35 @@ fn glyph(c: char) -> [u8; 7] {
         'F' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000],
         'P' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000],
         'S' => [0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110],
+        'D' => [0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110],
+        'G' => [0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111],
+        'I' => [0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
+        'N' => [0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001],
+        'O' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+        'R' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001],
+        'T' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100],
+        'V' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100],
         _ => [0; 7],
     }
 }
 
-/// The text for a frame rate in tenths.
-fn text(tenths: u32) -> String {
-    format!("{}.{} FPS", tenths / 10, tenths % 10)
+/// The text for a frame rate in tenths, the frames shown for each one rendered
+/// (`times`, above 1 with frame generation: then the rate shown follows as FG),
+/// and what the GTA V keys take the player for (`crate::KBM_MODE`): W and S
+/// drive only in DRIVING.
+fn text(tenths: u32, times: u32, mode: u8) -> String {
+    let tenth = |t: u32| format!("{}.{}", t / 10, t % 10);
+    let shown = if times > 1 {
+        format!("  FG {} FPS", tenth(tenths.saturating_mul(times)))
+    } else {
+        String::new()
+    };
+    let mode = match mode {
+        1 => "  ON FOOT",
+        2 => "  DRIVING",
+        _ => "",
+    };
+    format!("{} FPS{shown}{mode}", tenth(tenths))
 }
 
 /// Bytes a pixel of a swap chain format this layer presents in, or none.
@@ -152,7 +174,7 @@ struct Made {
 unsafe impl Send for Made {}
 
 /// The boxes made so far, by text, format and scale.
-static MADE: Mutex<Option<HashMap<(u32, i32, u32), Made>>> = Mutex::new(None);
+static MADE: Mutex<Option<HashMap<(u32, u32, u8, i32, u32), Made>>> = Mutex::new(None);
 
 /// Copies the frame rate's box onto `back`, a back buffer of `width` by
 /// `height` pixels of `format` that `list` holds as a copy's destination.
@@ -180,9 +202,11 @@ pub(crate) fn draw(host: &crate::host::Host, list: &ID3D12GraphicsCommandList, b
         // over thousands of values is not expected.)
         made.clear();
     }
-    let key = (tenths, format.0, scale);
+    let mode = crate::KBM_MODE.load(Ordering::Relaxed);
+    let times = crate::streamline::shown_per_frame();
+    let key = (tenths, times, mode, format.0, scale);
     if let std::collections::hash_map::Entry::Vacant(e) = made.entry(key) {
-        let (w, h, lit) = bitmap(&text(tenths), scale);
+        let (w, h, lit) = bitmap(&text(tenths, times, mode), scale);
         let pitch = (w as usize * bytes).next_multiple_of(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT as usize);
         let Some((buffer, data)) = host.shared_buffer((pitch * h as usize) as u64) else {
             return;
@@ -233,9 +257,16 @@ mod tests {
 
     #[test]
     fn the_text_is_the_rate_to_a_tenth() {
-        assert_eq!(text(103), "10.3 FPS");
-        assert_eq!(text(7), "0.7 FPS");
-        assert_eq!(text(300), "30.0 FPS");
+        assert_eq!(text(103, 1, 0), "10.3 FPS");
+        assert_eq!(text(7, 1, 0), "0.7 FPS");
+        assert_eq!(text(300, 1, 0), "30.0 FPS");
+        assert_eq!(text(115, 1, 1), "11.5 FPS  ON FOOT");
+        assert_eq!(text(115, 1, 2), "11.5 FPS  DRIVING");
+        assert_eq!(text(119, 2, 0), "11.9 FPS  FG 23.8 FPS");
+        assert_eq!(text(119, 2, 2), "11.9 FPS  FG 23.8 FPS  DRIVING");
+        // Every letter shown has a glyph.
+        let shown = text(0, 2, 1) + &text(0, 2, 2);
+        assert!(shown.chars().all(|c| c == ' ' || glyph(c) != [0; 7]));
     }
 
     #[test]

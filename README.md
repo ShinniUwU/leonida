@@ -391,7 +391,10 @@ Input: XInput pads. With none connected, the keyboard acts as a pad while the ga
 `Space` = X, `R` = B, `F` = Y, `Tab` = LB, `Q` = RB, `Ctrl` = L3, `C` = R3, `E` = D-pad right,
 `M` = D-pad up, `Z` = D-pad down, `G` = D-pad left, `V` = View, `P` or `Esc` = Menu (letters by
 their place on the keyboard, as in the table above). With `LEONIDA_MOUSE_CAPTURE=1` the right and
-left mouse buttons are LT and RT. From Belobug/VIctory-Belobug-AMD (pull request #295 by
+left mouse buttons are LT and RT and the mouse turns the camera (the right stick). `F` also starts
+and ends driving: then `W` = RT (drive), `S` = LT (brake, reverse), `Space` = RB (handbrake) and
+the mouse buttons LB and RB. `F` with no vehicle near gets that out of step; `F2` sets it right.
+From Belobug/VIctory-Belobug-AMD (pull request #295 by
 zhu1025960209-web).
 
 `LEONIDA_MOUSE_CAPTURE=1` (off by default) keeps the cursor hidden inside the game's window while it

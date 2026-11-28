@@ -137,8 +137,8 @@ const LIST: &[Switch] = &[
     Switch {
         name: "LEONIDA_KBM_GTA",
         label: "GTA V KEYS AND MOUSE",
-        help: "Keys laid out like GTA V on PC; the mouse buttons aim and shoot. The mouse \
-               needs MOUSE CAPTURE on.",
+        help: "Keys laid out like GTA V on PC; F starts driving (W, S, Space), F2 if it got \
+               out of step. The mouse needs MOUSE CAPTURE on.",
         group: Group::Controls,
         values: OFF_ON,
         default: "0",

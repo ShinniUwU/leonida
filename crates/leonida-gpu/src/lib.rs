@@ -56,6 +56,9 @@ mod host;
 /// (read by the input module).
 pub static SETTINGS_MENU_OPEN: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+/// What the GTA V keys take the player for (set by the input module, shown
+/// beside the frame rate): 0 the keys are off, 1 on foot, 2 driving.
+pub static KBM_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 #[cfg(windows)]
 mod indirect;
 #[cfg(windows)]

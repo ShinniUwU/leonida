@@ -128,9 +128,10 @@ const LETTER_POSITIONS: [(u32, u8); 21] = [
 ];
 
 /// GTA V PC-style keys for the stand-in pad (`LEONIDA_KBM_GTA`): the left
-/// stick stays W/A/S/D and the right stick I/J/K/L; the triggers are the
-/// mouse's buttons (right: LT, left: RT), and the camera follows the mouse
-/// device itself. Letters count by where they are ([`pad_key`]); Shift and
+/// stick stays W/A/S/D and the right stick I/J/K/L; on foot the triggers are
+/// the mouse's buttons (right: LT, left: RT), driving W and S ([`fallback_in`]),
+/// and the mouse pushes the right stick ([`Kbm`]). Letters count by where
+/// they are ([`pad_key`]); Shift and
 /// Ctrl as left and right keys (`0xA0..=0xA3`), as `Host::keys` reports them.
 const GTA_BUTTONS: [(u8, u32); 26] = [
     (0x1B, MENU),           // Esc
@@ -298,13 +299,17 @@ trait Source: Send {
     fn rumble(&mut self, slot: usize, low: u16, high: u16);
 }
 
-/// The stand-in pad of the keys held and the mouse's buttons (bit 0 left,
-/// bit 1 right; the triggers with the GTA V keys only).
-fn fallback(keys: &[KeyState], mouse_buttons: u32) -> PadState {
-    fallback_for(keys, gta_kbm(), mouse_buttons)
+#[cfg(test)]
+fn fallback_for(keys: &[KeyState], gta: bool, mouse_buttons: u32) -> PadState {
+    fallback_in(keys, gta, false, mouse_buttons)
 }
 
-fn fallback_for(keys: &[KeyState], gta: bool, mouse_buttons: u32) -> PadState {
+/// The stand-in pad of the keys held and the mouse's buttons (bit 0 left,
+/// bit 1 right; the triggers with the GTA V keys only). With the GTA V keys
+/// and `driving` ([`Kbm`]), as on PC in a vehicle: W drives (RT), S brakes
+/// and reverses (LT), Space is the handbrake (RB), the right button aims out
+/// of the window (LB) and the left one shoots (RB).
+fn fallback_in(keys: &[KeyState], gta: bool, driving: bool, mouse_buttons: u32) -> PadState {
     let on = |vk: u8| {
         if keys.iter().any(|k| pad_key(k) == vk) {
             1.0
@@ -314,17 +319,79 @@ fn fallback_for(keys: &[KeyState], gta: bool, mouse_buttons: u32) -> PadState {
     };
     let click = |bit: u32| if mouse_buttons & bit != 0 { 1.0 } else { 0.0 };
     let table: &[(u8, u32)] = if gta { &GTA_BUTTONS } else { &FALLBACK_BUTTONS };
+    let driving = gta && driving;
+    let mut buttons = table
+        .iter()
+        .filter(|(vk, _)| on(*vk) != 0.0)
+        .map(|&(vk, bit)| if driving && vk == 0x20 { RIGHT_SHOULDER } else { bit })
+        .fold(0, |all, bit| all | bit);
+    if driving {
+        buttons |= if click(2) != 0.0 { LEFT_SHOULDER } else { 0 };
+        buttons |= if click(1) != 0.0 { RIGHT_SHOULDER } else { 0 };
+    }
     PadState {
-        buttons: table
-            .iter()
-            .filter(|(vk, _)| on(*vk) != 0.0)
-            .fold(0, |all, (_, bit)| all | bit),
-        left_trigger: if gta { click(2) } else { on(b'Z') },
-        right_trigger: if gta { click(1) } else { on(b'C') },
+        buttons,
+        left_trigger: if driving { on(b'S') } else if gta { click(2) } else { on(b'Z') },
+        right_trigger: if driving { on(b'W') } else if gta { click(1) } else { on(b'C') },
         left_x: on(b'D') - on(b'A'),
-        left_y: on(b'W') - on(b'S'),
+        left_y: if driving { 0.0 } else { on(b'W') - on(b'S') },
         right_x: on(b'L') - on(b'J'),
         right_y: on(b'I') - on(b'K'),
+    }
+}
+
+/// Cursor steps in one poll that push the right stick all the way.
+const LOOK_FULL: f32 = 16.0;
+/// The part of the stick the title ignores around its middle: the mouse's
+/// smallest moves start just past it.
+const LOOK_DEAD_ZONE: f32 = 0.2;
+
+/// What the GTA V keys carry over polls: whether the player drives (F, the
+/// enter and exit key, flips it; F2 flips it back after an F with no vehicle
+/// near) and the right stick the mouse pushes.
+#[derive(Debug, Default)]
+struct Kbm {
+    driving: bool,
+    /// F and F2 at the last poll.
+    held: [bool; 2],
+    look: (f32, f32),
+    /// The mouse device's position at the last poll.
+    last: Option<(i64, i64)>,
+}
+
+impl Kbm {
+    /// One poll of the keys held and the mouse device: the right stick, the
+    /// mouse's steps since the last poll as a push (up positive).
+    fn step(&mut self, keys: &[KeyState], mouse: Option<&MouseState>, gta: bool) -> (f32, f32) {
+        if !gta {
+            *self = Kbm::default();
+            return (0.0, 0.0);
+        }
+        let down = [b'F', 0x71].map(|vk| keys.iter().any(|k| pad_key(k) == vk));
+        for (now, was) in down.into_iter().zip(&mut self.held) {
+            if now && !*was {
+                self.driving = !self.driving;
+                tracing::info!(driving = self.driving, "GTA V keys: on foot or driving");
+            }
+            *was = now;
+        }
+        let at = mouse.map(|m| (m.position_x, m.position_y));
+        let (dx, dy) = match (self.last, at) {
+            (Some(was), Some(now)) => (now.0 - was.0, now.1 - was.1),
+            _ => (0, 0),
+        };
+        self.last = at;
+        let push = |steps: i64| (steps as f32 / LOOK_FULL).clamp(-1.0, 1.0);
+        self.look.0 += (push(dx) - self.look.0) * 0.5;
+        self.look.1 += (push(-dy) - self.look.1) * 0.5;
+        let past_dead_zone = |v: f32| {
+            if v.abs() < 0.05 {
+                0.0
+            } else {
+                v.signum() * (LOOK_DEAD_ZONE + (1.0 - LOOK_DEAD_ZONE) * v.abs())
+            }
+        };
+        (past_dead_zone(self.look.0), past_dead_zone(self.look.1))
     }
 }
 
@@ -545,6 +612,7 @@ struct State {
     pending: Vec<Event>,
     /// Device callbacks running now: token and thread.
     running: Vec<(u64, ThreadId)>,
+    kbm: Kbm,
 }
 
 pub struct Hub {
@@ -592,6 +660,7 @@ impl Hub {
                 callbacks: Vec::new(),
                 pending: Vec::new(),
                 running: Vec::new(),
+                kbm: Kbm::default(),
             }),
             returned: Condvar::new(),
         }));
@@ -680,9 +749,15 @@ impl State {
         let now = now();
         let mut events = std::mem::take(&mut self.pending);
         let clicks = mouse.map_or(0, |m| m.buttons);
+        let gta = gta_kbm();
+        let (right_x, right_y) = self.kbm.step(&keys, mouse.as_ref(), gta);
+        let mode = if !gta { 0 } else if self.kbm.driving { 2 } else { 1 };
+        leonida_gpu::KBM_MODE.store(mode, std::sync::atomic::Ordering::Relaxed);
+        let look = PadState { right_x, right_y, ..Default::default() };
+        let stand_in = merged(fallback_in(&keys, gta, self.kbm.driving, clicks), look);
         self.update(devices, MOUSE, mouse.map(Value::Mouse), now, &mut events);
         if one_pad {
-            let pad = pads.into_iter().flatten().fold(fallback(&keys, clicks), merged);
+            let pad = pads.into_iter().flatten().fold(stand_in, merged);
             self.update(devices, FALLBACK, Some(Value::Pad(pad)), now, &mut events);
             self.update(devices, KEYBOARD, Some(Value::Keys(keys)), now, &mut events);
             return events;
@@ -691,7 +766,7 @@ impl State {
         for (slot, pad) in pads.into_iter().enumerate() {
             self.update(devices, slot, pad.map(Value::Pad), now, &mut events);
         }
-        let fallback = (!any_pad).then(|| Value::Pad(fallback(&keys, clicks)));
+        let fallback = (!any_pad).then_some(Value::Pad(stand_in));
         self.update(devices, FALLBACK, fallback, now, &mut events);
         self.update(devices, KEYBOARD, Some(Value::Keys(keys)), now, &mut events);
         events
@@ -2089,6 +2164,63 @@ mod tests {
         let pad = fallback_for(&[at(0x2C, b'Z'), at(0x2E, b'C')], true, 0);
         assert_eq!((pad.left_trigger, pad.right_trigger), (0.0, 0.0));
         assert_eq!(pad.buttons, DOWN | RIGHT_STICK);
+    }
+
+    #[test]
+    fn driving_w_and_s_are_the_triggers_and_space_the_handbrake() {
+        let at = |scan_code, virtual_key| KeyState { scan_code, virtual_key, ..Default::default() };
+        let (w, s, space) = (at(0x11, b'W'), at(0x1F, b'S'), at(0x39, 0x20));
+        let pad = fallback_in(&[w], true, true, 0);
+        assert_eq!((pad.right_trigger, pad.left_trigger, pad.left_y), (1.0, 0.0, 0.0));
+        let pad = fallback_in(&[s, space], true, true, 0);
+        assert_eq!((pad.right_trigger, pad.left_trigger), (0.0, 1.0));
+        assert_eq!(pad.buttons, RIGHT_SHOULDER);
+        // The clicks aim and shoot out of the window, not drive.
+        let pad = fallback_in(&[], true, true, 0b11);
+        assert_eq!((pad.left_trigger, pad.right_trigger), (0.0, 0.0));
+        assert_eq!(pad.buttons, LEFT_SHOULDER | RIGHT_SHOULDER);
+        // On foot W walks and Space jumps; without the GTA keys driving is nothing.
+        let pad = fallback_in(&[w, space], true, false, 0);
+        assert_eq!((pad.left_y, pad.right_trigger, pad.buttons), (1.0, 0.0, X));
+        assert_eq!(fallback_in(&[w], false, true, 0), fallback_for(&[w], false, 0));
+    }
+
+    #[test]
+    fn f_and_f2_flip_driving_once_per_press() {
+        let at = |scan_code, virtual_key| KeyState { scan_code, virtual_key, ..Default::default() };
+        let (f, f2) = (at(0x21, b'F'), at(0x3C, 0x71));
+        let mut kbm = Kbm::default();
+        kbm.step(&[f], None, true);
+        kbm.step(&[f], None, true);
+        assert!(kbm.driving, "held is one press");
+        kbm.step(&[], None, true);
+        kbm.step(&[f2], None, true);
+        assert!(!kbm.driving);
+        kbm.step(&[f], None, true);
+        kbm.step(&[f], None, false);
+        assert!(!kbm.driving, "the GTA keys off forget it");
+    }
+
+    #[test]
+    fn the_mouse_pushes_the_right_stick_and_lets_go() {
+        let mouse = |x, y| MouseState { position_x: x, position_y: y, ..Default::default() };
+        let mut kbm = Kbm::default();
+        assert_eq!(kbm.step(&[], Some(&mouse(0, 0)), true), (0.0, 0.0));
+        // Right and up (the cursor's y grows down).
+        let (x, y) = kbm.step(&[], Some(&mouse(64, -64)), true);
+        assert!(x > LOOK_DEAD_ZONE && y > LOOK_DEAD_ZONE, "{x} {y}");
+        let (x, _) = kbm.step(&[], Some(&mouse(128, -128)), true);
+        assert_eq!(x, LOOK_DEAD_ZONE + (1.0 - LOOK_DEAD_ZONE) * 0.75);
+        // A small move is past the dead zone; a still mouse lets go in a few polls.
+        let mut still = (1.0, 1.0);
+        for _ in 0..8 {
+            still = kbm.step(&[], Some(&mouse(128, -128)), true);
+        }
+        assert_eq!(still, (0.0, 0.0));
+        let (x, _) = kbm.step(&[], Some(&mouse(130, -128)), true);
+        assert!(x > LOOK_DEAD_ZONE, "{x}");
+        // No mouse (capture off) is no push.
+        assert_eq!(Kbm::default().step(&[], None, true), (0.0, 0.0));
     }
 
     #[test]
