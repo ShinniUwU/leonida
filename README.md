@@ -236,10 +236,31 @@ Proton 11.0, it restored creation of six refused compute
 pipelines; it does not establish correct gameplay or a frame-rate improvement. See the
 [validation details](docs/fork-notes.md#r-7-large-code-literal-tables-on-nvidia-2026-11-26).
 
+#### VIctory-NVIDIA's settings (`nvidia-swap`, NVIDIA cards, off by default)
+
+The `nvidia-swap` profile turns on the speed switches trustno1-coder/VIctory-NVIDIA uses. On one
+RTX 3080 12 GB it gave 12.5 fps in play and 12.3 fps in the opening cutscene, against 9.2 and 3.4
+fps for `base` alone ([the note](docs/notes/2026-11-28-nvidia-base.md)). No other card was
+measured. It leaves out two shaders (decal heap tidying and heat haze), so the picture is not
+quite the console's.
+
+1. Open `leonida.toml` in Notepad (beside `leonida.exe` in a ready-made build, in the checkout
+   when you build it yourself).
+2. Add these two lines at the end, or, if it already has a `[graphics]` section, add
+   `"nvidia-swap"` to its `profiles` line:
+
+   ```toml
+   [graphics]
+   profiles = ["nvidia-swap"]
+   ```
+
+3. Save and start the game as usual. To turn it off, remove `"nvidia-swap"` again.
+
 #### DLSS Super Resolution (NVIDIA RTX, experimental, off by default)
 
-DLSS can do the game's upscaling instead of its own FidelityFX upscaler. Nobody has run it on
-this renderer yet and nothing was measured, so treat it as something to try. NVIDIA's files are not part of this
+DLSS can do the game's upscaling instead of its own FidelityFX upscaler. It ran on one RTX 3080
+only together with frame generation (below); on its own nothing was measured, so treat it as
+something to try. NVIDIA's files are not part of this
 repository; you download them once yourself:
 
 1. Run `scripts\get-nvidia-dlss.ps1` in PowerShell. It shows what it will get (NVIDIA Streamline
@@ -290,7 +311,9 @@ runs at 60 fps or more. See [the note](docs/notes/2026-11-27-frame-generation.md
 #### AMD FSR 3 frame generation (other cards with DLSS, experimental, off by default)
 
 On an RTX 20 or 30 card the `dlss-framegen` profile uses AMD FSR 3 frame generation instead (2x
-at most). It also needs DLSS upscaling on, and it has not been run in the game by anyone yet.
+at most). It also needs DLSS upscaling on. On one RTX 3080 with `nvidia-swap` it showed about 24
+fps from 11.9 rendered, and ran without a crash for 450 s. The two profiles go together as
+`profiles = ["nvidia-swap", "dlss-framegen"]`.
 
 1. Run `scripts\get-amd-fsr.ps1` in PowerShell. It shows what it will get (two DLLs of AMD's
    FidelityFX SDK v2.4.0, from AMD's GitHub, and AMD's licence) and asks first. It checks each
@@ -387,21 +410,30 @@ Input: XInput pads. With none connected, the keyboard acts as a pad while the ga
 | F / H | stick clicks |
 | Esc, Tab | Menu, View |
 
-`LEONIDA_KBM_GTA=1` (off by default) lays the keys out like GTA V on PC instead: `Shift` = A,
-`Space` = X, `R` = B, `F` = Y, `Tab` = LB, `Q` = RB, `Ctrl` = L3, `C` = R3, `E` = D-pad right,
-`M` = D-pad up, `Z` = D-pad down, `G` = D-pad left, `V` = View, `P` or `Esc` = Menu (letters by
-their place on the keyboard, as in the table above). With `LEONIDA_MOUSE_CAPTURE=1` the right and
-left mouse buttons are LT and RT and the mouse turns the camera (the right stick). `F` also starts
-and ends driving: then `W` = RT (drive), `S` = LT (brake, reverse), `Space` = RB (handbrake) and
-the mouse buttons LB and RB. `F` with no vehicle near gets that out of step; `F2` sets it right.
-From Belobug/VIctory-Belobug-AMD (pull request #295 by
-zhu1025960209-web).
+To play with keys and mouse laid out like GTA V on PC (off by default):
 
-`LEONIDA_MOUSE_CAPTURE=1` (off by default) keeps the cursor hidden inside the game's window while it
-is in front, so a click never lands on another window or screen, and gives the game a mouse that
-turns the camera; switching to another window or opening `F1` lets the cursor go.
-`LEONIDA_MOUSE_SENS` sets how fast the mouse turns it (`1.0`), `LEONIDA_MOUSE_INVERT_Y=1` turns up
-and down round. From trustno1-coder/VIctory-NVIDIA (06afe63, e68f48a).
+1. Start the game and press `F1`.
+2. Press `E` until Controls shows, and turn on GTA V KEYS AND MOUSE and MOUSE CAPTURE.
+3. Press `F1` to close the menu. Both stay on for the next start.
+
+The keys are then `Shift` = A, `Space` = X, `R` = B, `F` = Y, `Tab` = LB, `Q` = RB, `Ctrl` = L3,
+`C` = R3, `E` = D-pad right, `M` = D-pad up, `Z` = D-pad down, `G` = D-pad left, `V` = View, `P`
+or `Esc` = Menu (letters by their place on the keyboard, as in the table above). The right and
+left mouse buttons are LT and RT, and the mouse turns the camera. From
+Belobug/VIctory-Belobug-AMD (pull request #295 by zhu1025960209-web).
+
+`F` gets in and out of a vehicle and also switches the keys to driving: then `W` drives, `S`
+brakes and reverses, `Space` is the handbrake and the mouse buttons aim and shoot from the
+vehicle. The keys can't tell when the game puts you in a vehicle or takes you out by itself, or
+when `F` found no vehicle near: if `W` and `S` do the wrong thing, press `F2` once. The frame rate
+in the corner (FPS ON SCREEN in `F1`) shows ON FOOT or DRIVING.
+
+MOUSE CAPTURE keeps the cursor hidden inside the game's window while it is in front, so a click
+never lands on another window or screen. Hold `Alt` to get the cursor back (for the close button,
+the taskbar or another window); switching to another window or opening `F1` lets it go too.
+MOUSE SENSITIVITY and INVERT MOUSE Y are in the same tab. From trustno1-coder/VIctory-NVIDIA
+(06afe63, e68f48a). The same switches can be set as `LEONIDA_KBM_GTA=1`,
+`LEONIDA_MOUSE_CAPTURE=1`, `LEONIDA_MOUSE_SENS` and `LEONIDA_MOUSE_INVERT_Y=1`.
 
 `F1` opens the settings menu while the game runs. It shows only what applies at once: Display (fps
 on screen, the performance panel, a frame-rate cap), Frame generation (its amount), Picture and
