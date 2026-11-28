@@ -2,7 +2,7 @@
 # someone else's mod (github.com/dashdogy/MFG-Unlocker, MIT licence, about 5 MB) that lets DLSS
 # Frame Generation run on GeForce RTX 20 and 30 cards. NVIDIA does not support that, it is not part
 # of this repository, and it was not tested with this game. leonida.exe loads it only with
-# LEONIDA_MFG_UNLOCKER=1 (F1, FRAME GENERATION, MFG UNLOCKER), from this folder under its own
+# LEONIDA_MFG_UNLOCKER=1 (MFG UNLOCKER in the Leonida launcher), from this folder under its own
 # name: nothing is renamed or put beside the game. Asks before downloading.
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\get-mfg-unlocker.ps1 [-Yes] [-To <folder>]
@@ -44,7 +44,8 @@ Write-Host "MFG Unlocker $version, someone else's mod (MIT licence), not part of
 Write-Host "  from: github.com/dashdogy/MFG-Unlocker (release v$version, about 5 MB)"
 Write-Host "  to:   $dir"
 Write-Host '  what: DLSS Frame Generation on RTX 20 and 30 cards. NVIDIA does not support it, and it'
-Write-Host '        was not tested with this game. If the game fails, turn it off: F1, MFG UNLOCKER.'
+Write-Host '        was not tested with this game. If the game fails, turn it off: MFG UNLOCKER,'
+Write-Host '        OFF in the Leonida launcher.'
 if ((Test-Path -LiteralPath $target) -and
     (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -eq $module) {
     Write-Host '  already there.'
@@ -104,5 +105,6 @@ $mb = (Get-Item -LiteralPath $target).Length / 1MB
 Write-Host ('  MFGUnlocker.dll  {0:N1} MB, v{1}, checked against the published SHA-256' -f $mb, $version)
 Write-Host "  in $dir (its licence and notices beside it)"
 Write-Host ''
-Write-Host 'Done. It is loaded from the next start with LEONIDA_MFG_UNLOCKER=1 (F1, MFG UNLOCKER), DLSS'
-Write-Host 'and DLSS frame generation on (the dlss-framegen profile sets both).'
+Write-Host 'Done. It is loaded from the next start with MFG UNLOCKER on in the Leonida launcher'
+Write-Host '(LEONIDA_MFG_UNLOCKER=1) and DLSS with DLSS frame generation on (the dlss-framegen'
+Write-Host 'profile sets both).'
