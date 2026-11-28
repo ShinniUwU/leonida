@@ -75,8 +75,9 @@
       "name": "nvidia-swap",
       "opt_in": true,
       "match": {},
-      "measured": "RTX 3080 12 GB, driver 621.24, Ryzen 7 7800X3D, Series X, unattended measure-run.ps1, 2026-11-28: with base, 12.5 fps in play and 12.3 fps in the opening cutscene, against 9.2 and 3.4 fps for base alone on main; no device loss or crash report. Only this card was measured. See docs/notes/2026-11-28-nvidia-base.md. Local test of the gpu, shader, hle and formats crates of trustno1-coder/VIctory-NVIDIA 63b902f (renderer from codec-d/cool_fox f4b48ad). These are the switches the SETTINGS table of their play.rs at 63b902f turns on, renamed to LEONIDA_ (SLOT_EVICT, ALLOCATOR_TRIM and BUDGET_PACK are the memory stack by skornuta); path settings, LOG, DLSS, FRAMEGEN, FSR, MENU, FRAME_INTERVAL_US and PIPELINE_BOOK are left out. LEAVE_OUT skips two shaders (decal heap defragmentation, heat haze), so it changes the picture.",
+      "measured": "RTX 3080 12 GB, driver 621.24, Ryzen 7 7800X3D, Series X, unattended measure-run.ps1, 2026-11-28: with base, 12.5 fps in play and 12.3 fps in the opening cutscene, against 9.2 and 3.4 fps for base alone on main; no device loss or crash report. Only this card was measured. See docs/notes/2026-11-28-nvidia-base.md. Local test of the gpu, shader, hle and formats crates of trustno1-coder/VIctory-NVIDIA 63b902f (renderer from codec-d/cool_fox f4b48ad). These are the switches the SETTINGS table of their play.rs at 63b902f turns on, renamed to LEONIDA_ (SLOT_EVICT, ALLOCATOR_TRIM and BUDGET_PACK are the memory stack by skornuta); path settings, LOG, DLSS, FRAMEGEN, FSR, MENU, FRAME_INTERVAL_US and PIPELINE_BOOK are left out. LEAVE_OUT skips two shaders (decal heap defragmentation, heat haze), so it changes the picture. TEARING is ours: their crates allow tearing unless told not to, the runs above had it on, and here it is off unless a profile turns it on (a frame may tear on a screen without G-SYNC or FreeSync).",
       "env": {
+        "LEONIDA_TEARING": "1",
         "LEONIDA_THIN": "1",
         "LEONIDA_JOIN_PARTS": "8",
         "LEONIDA_RELAY": "2",

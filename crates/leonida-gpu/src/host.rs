@@ -9471,13 +9471,14 @@ struct Presenter {
 }
 
 /// Whether the swap chain lets a frame be shown as soon as it is presented, not at the screen's
-/// next refresh (`DXGI_FEATURE_PRESENT_ALLOW_TEARING`; `LEONIDA_TEARING=0`: not). Without it a
-/// window in front, which Windows then shows without its compositor ("independent flip"), had
-/// each frame wait for a refresh with two buffers: frame times rounded up to whole refreshes,
-/// about 2 fps fewer than the same window behind another (2026-11-28). On a G-SYNC or FreeSync
-/// screen nothing tears; on others a frame may.
+/// next refresh (`DXGI_FEATURE_PRESENT_ALLOW_TEARING`; only with `LEONIDA_TEARING=1`, which the
+/// nvidia-swap profile sets). Without it a window in front, which Windows then shows without its
+/// compositor ("independent flip"), had each frame wait for a refresh with two buffers: frame
+/// times rounded up to whole refreshes, about 2 fps fewer than the same window behind another
+/// (2026-11-28, one RTX 3080). Off by default because on a screen without G-SYNC or FreeSync a
+/// frame may tear, which `main` never did.
 fn tearing(factory: &IDXGIFactory2) -> bool {
-    if std::env::var("LEONIDA_TEARING").is_ok_and(|v| v.trim() == "0") {
+    if !std::env::var("LEONIDA_TEARING").is_ok_and(|v| v.trim() == "1") {
         return false;
     }
     let Ok(factory) = factory.cast::<IDXGIFactory5>() else { return false };
@@ -10413,7 +10414,10 @@ impl Host {
         unsafe {
             let factory: IDXGIFactory2 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0))?;
             let tearing = tearing(&factory);
-            tracing::info!(tearing, "swap chain: frames shown as soon as presented (LEONIDA_TEARING=0: at the next refresh)");
+            tracing::info!(
+                tearing,
+                "swap chain: frames shown as soon as presented (LEONIDA_TEARING=1)"
+            );
             let desc = DXGI_SWAP_CHAIN_DESC1 {
                 Width: width,
                 Height: height,

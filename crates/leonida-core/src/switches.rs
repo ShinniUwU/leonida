@@ -349,7 +349,7 @@ const LIST: &[Switch] = &[
                picture can tear.",
         group: Group::Display,
         values: OFF_ON,
-        default: "1",
+        default: "0",
         live: false,
     },
     Switch {

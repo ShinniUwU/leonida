@@ -94,6 +94,17 @@ Seen by the owner on the same PC, not fixed here:
 shader crate has none of the code they change, so they were dropped when the branch was rebased
 onto `main` b89f2af7.
 
+**Tearing is opt-in.** VIctory-NVIDIA's crates show a frame as soon as it is presented unless
+`LEONIDA_TEARING=0`; `main` always waited for the screen, and on a screen without G-SYNC or
+FreeSync a frame may tear. Here it is off unless `LEONIDA_TEARING=1`, which nvidia-swap sets, so
+the runs above (taken with it on) still describe that profile.
+
+**Not run without a profile.** Every run above had nvidia-swap. A player with no profile gets the
+new crates with `base` alone, which was not run, and no AMD or Intel card was run. `base` still
+sets `LEONIDA_QUEUE2`, `LEONIDA_COPY_PLAIN`, `LEONIDA_BACK_OWN_VIEW` and
+`LEONIDA_INDIRECT_GATHER`, which only `main`'s crates read, and `LEONIDA_ASYNC_SUBMIT=1`, which
+here needs nvidia-swap's relay and is otherwise left off with a log line.
+
 ### Settings check
 
 A settings file in the menu's format with only `LEONIDA_FRAME_INTERVAL_US=25000` (a 40 fps cap),
