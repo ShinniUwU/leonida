@@ -914,9 +914,10 @@ mod tests {
             )
             .is_err()
         );
+        // (the player's own settings file still applies with `none`: left out here)
         for value in [
             env(&[("LEONIDA_GRAPHICS_OFF", "1")]),
-            env(&[("LEONIDA_PROFILE", "none")]),
+            env(&[("LEONIDA_PROFILE", "none"), ("LEONIDA_SAVED_SETTINGS", "0")]),
         ] {
             let plan = load(&GraphicsSettings::default(), Some(&source), gpu(), &value).unwrap();
             assert!(plan.settings.is_empty());
