@@ -123,6 +123,25 @@
         "LEONIDA_EARLY_DEPTH": "1",
         "LEONIDA_LEAVE_OUT": "02384a60fda6f2d0,731a39171b568298"
       }
+    },
+    {
+      "name": "dlss",
+      "opt_in": true,
+      "match": {},
+      "measured": "Not measured on the swap: no frame times taken with upstream's Streamline yet. Opt-in for testers with an NVIDIA RTX card and the files from scripts/get-nvidia-dlss.ps1; without those files it changes nothing. See docs/notes/2026-11-27-dlss-super-resolution.md.",
+      "env": { "LEONIDA_DLSS": "quality" }
+    },
+    {
+      "name": "dlss-framegen",
+      "opt_in": true,
+      "match": {},
+      "measured": "Not measured on the swap: no run with NVIDIA's or AMD's files was made. DLSS upscaling with frame generation: DLSS Frame Generation on an RTX 40 or 50 card, AMD FSR 3 frame generation (2x at most) on others, as VIctory-NVIDIA chooses. LEONIDA_TEXTURE_ROOM_PERCENT=80 is VIctory-NVIDIA's launcher value with frame generation on (it takes 1.5 to 2 GB of the card there), not measured here. Needs the base profile's LEONIDA_ASYNC_SUBMIT=1 (or LEONIDA_THIN=1), the files from scripts/get-nvidia-dlss.ps1 and, for FSR 3, the ones from scripts/get-amd-fsr.ps1 (leonida run offers both once, default no). See docs/notes/2026-11-27-frame-generation.md.",
+      "env": {
+        "LEONIDA_DLSS": "quality",
+        "LEONIDA_FRAMEGEN": "1",
+        "LEONIDA_FSR_FRAMEGEN": "1",
+        "LEONIDA_TEXTURE_ROOM_PERCENT": "80"
+      }
     }
   ]
 }
