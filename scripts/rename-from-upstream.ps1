@@ -1,6 +1,7 @@
 # Renames what comes in from upstream (fxceless/victory-gta6 or VIctory) to this fork's names:
 # VIctory -> Leonida Legacy, VICTORY -> LEONIDA, victory -> leonida, in the tracked text files and
-# in tracked paths. Credits keep upstream's name: links, upstream commit and issue references, the
+# in tracked paths. Credits keep upstream's name: links, upstream commit and issue references,
+# other forks' names (Marvisak/VIctory, VIctory-NVIDIA, fxceless/victory-fork), the
 # README's credits and its copy of upstream's README. Running it on an already renamed tree changes
 # nothing, so it is safe to run after every merge or cherry-pick from upstream:
 #
@@ -29,7 +30,15 @@ $protectAll = @(
     'victory-gta6',
     '[Uu]pstream VIctory',
     'VIctory(?= #\d)',
-    'VIctory(?= [0-9a-f]{7}\b)'
+    'VIctory(?= [0-9a-f]{7}\b)',
+    # Other forks and repositories: VIctory-NVIDIA, Marvisak/VIctory, fxceless/victory-fork. A
+    # lower-case owner/victory-name is a repository unless the owner is one of our own folders.
+    '[\w.-]+/VIctory[\w-]*',
+    'VIctory-[\w-]+',
+    '(?<![\w./\-])(?!(?:crates|apps|src|docs|scripts|xtask|target)/)[\w.-]+/victory-[\w-]+',
+    'victory-[\w-]+(?= #\d)',
+    # Another fork's own switches, named as its: "foxhound's `VICTORY_WC_BAR`".
+    '(?<=\w''s `)VICTORY_\w+'
 )
 $protectReadme = @('VIctory(?![A-Za-z])')
 
