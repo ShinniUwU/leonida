@@ -111,6 +111,8 @@ mod tests {
                 "--nocapture",
             ])
             .env(CHILD, "1")
+            // Not the player's own settings file.
+            .env("LEONIDA_SAVED_SETTINGS", "0")
             .env("LEONIDA_CONFIG", config)
             .env("LEONIDA_QUEUE2", "2")
             .env("LEONIDA_JOIN_PARTS", "")

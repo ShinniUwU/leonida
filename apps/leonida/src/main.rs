@@ -146,6 +146,10 @@ enum Command {
         /// Print the effective graphics settings as JSON, without running a title.
         #[arg(long, conflicts_with = "game_dir")]
         graphics: bool,
+        /// Print the switches a player may touch as JSON (name, label, help,
+        /// group, values, default, live), for the launcher.
+        #[arg(long, conflicts_with_all = ["game_dir", "graphics"])]
+        switches_json: bool,
     },
 }
 
@@ -239,7 +243,16 @@ fn main() -> Result<()> {
             };
             run::run(&exe, unimplemented, strict, execute, console)
         }
-        Command::Config { game_dir, graphics } => {
+        Command::Config {
+            game_dir,
+            graphics,
+            switches_json,
+        } => {
+            if switches_json {
+                let file = leonida_core::settings::path().ok();
+                println!("{}", leonida_core::switches::to_json(file.as_deref())?);
+                return Ok(());
+            }
             if graphics {
                 let plan = graphics::plan(&leonida_core::Config::load()?)?;
                 println!("{}", plan.to_json()?);

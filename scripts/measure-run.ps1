@@ -63,6 +63,9 @@ try {
         if ($Profile) { $env:LEONIDA_PROFILE = $Profile }
         else { Remove-Item Env:LEONIDA_PROFILE -ErrorAction SilentlyContinue }
     }
+    # Not the player's own choices from the F1 menu or the launcher: runs compare like with
+    # like.
+    $env:LEONIDA_SAVED_SETTINGS = '0'
     $graphics = Get-LeonidaGraphics $exe
     Show-LeonidaGraphics $graphics
     $switches = @(Get-LeonidaGraphicsSwitches $graphics -Short)

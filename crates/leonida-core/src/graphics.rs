@@ -137,6 +137,7 @@ pub fn is_setting_key(name: &str) -> bool {
                 | "LEONIDA_PROFILE"
                 | "LEONIDA_KEEP_WINDOW"
                 | "LEONIDA_GRAPHICS_OFF"
+                | "LEONIDA_SAVED_SETTINGS"
                 | "LEONIDA_D3D12_WARP"
                 | "LEONIDA_RELAUNCHED_FROM"
                 | "LEONIDA_AUDIO_CAPTURE_OF"
@@ -163,7 +164,10 @@ fn snapshot_from(
             "a LEONIDA_ variable name is not valid Unicode; unset it"
         );
         if is_setting_key(&name)
-            || matches!(name.as_str(), "LEONIDA_PROFILE" | "LEONIDA_GRAPHICS_OFF")
+            || matches!(
+                name.as_str(),
+                "LEONIDA_PROFILE" | "LEONIDA_GRAPHICS_OFF" | "LEONIDA_SAVED_SETTINGS"
+            )
         {
             let value = value.into_string().map_err(|_| {
                 anyhow::anyhow!("{name} is not valid Unicode; unset it or set a text value")
@@ -268,7 +272,18 @@ pub fn load(
             Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
         }
     };
-    resolve(settings, gpu, &env, local.as_deref())
+    // The shared settings file (`crate::settings`): what the player chose in
+    // the F1 menu or the launcher. Damaged or unreadable: left out, said why.
+    let saved = if crate::settings::wanted(&env) {
+        let loaded = crate::settings::load();
+        for note in &loaded.notes {
+            eprintln!("settings file: {note}");
+        }
+        loaded.switches
+    } else {
+        Environment::new()
+    };
+    resolve_with_saved(settings, gpu, &env, &saved, local.as_deref())
 }
 
 /// Environment overrides TOML, which overrides profiles in catalog order.
@@ -277,6 +292,20 @@ pub fn resolve(
     settings: &GraphicsSettings,
     gpu: Option<Adapter>,
     env: &Environment,
+    local_json: Option<&str>,
+) -> Result<Plan> {
+    resolve_with_saved(settings, gpu, env, &Environment::new(), local_json)
+}
+
+/// [`resolve`], with the settings file's switches (`saved`) between the
+/// environment and TOML: an environment variable set by hand, then the file,
+/// then TOML, then the profiles. Only listed switches
+/// (`crate::switches::SWITCHES`) are taken from `saved`.
+pub fn resolve_with_saved(
+    settings: &GraphicsSettings,
+    gpu: Option<Adapter>,
+    env: &Environment,
+    saved: &Environment,
     local_json: Option<&str>,
 ) -> Result<Plan> {
     settings.validate()?;
@@ -337,6 +366,18 @@ pub fn resolve(
         for (name, value) in settings.values() {
             plan.settings.insert(name.clone(), value);
             plan.sources.insert(name, "config".into());
+        }
+        for (name, value) in normalized(saved) {
+            // An empty value is the AUTO choice: what TOML, the profiles or
+            // the code choose. Only a variable set by hand empties a switch.
+            if value.trim().is_empty() {
+                continue;
+            }
+            if is_setting_key(&name) && crate::switches::find(&name).is_some() {
+                ensure!(!value.contains('\0'), "{name} contains a NUL character");
+                plan.settings.insert(name.clone(), value);
+                plan.sources.insert(name, "settings".into());
+            }
         }
     }
     for (name, value) in env {
@@ -541,6 +582,70 @@ mod tests {
             assert_eq!(plan.settings, expected);
             assert!(plan.sources.values().all(|source| source == "profile:base"));
         }
+    }
+
+    #[test]
+    fn the_settings_file_comes_under_the_environment_and_over_toml_and_profiles() {
+        let local = local(json!([
+            { "name": "test-dlss", "opt_in": true, "env": { "LEONIDA_DLSS": "quality" } }
+        ]));
+        let settings = GraphicsSettings {
+            profiles: Some(vec!["test-dlss".into()]),
+            texture_room_percent: Some(70),
+            ..Default::default()
+        };
+        let saved = env(&[
+            ("LEONIDA_DLSS", "balanced"),
+            ("LEONIDA_TEXTURE_ROOM_PERCENT", "86"),
+            ("LEONIDA_KBM_GTA", "1"),
+            ("LEONIDA_MOUSE_SENS", "2"),
+            // Not a listed switch: never taken from the file.
+            ("LEONIDA_CARD_WINDOWS_MB", "4096"),
+        ]);
+        let by_hand = env(&[("LEONIDA_MOUSE_SENS", "0.5")]);
+        let plan =
+            resolve_with_saved(&settings, gpu(), &by_hand, &saved, Some(&local)).unwrap();
+        // Over the profile and over TOML.
+        assert_eq!(plan.settings["LEONIDA_DLSS"], "balanced");
+        assert_eq!(plan.sources["LEONIDA_DLSS"], "settings");
+        assert_eq!(plan.settings["LEONIDA_TEXTURE_ROOM_PERCENT"], "86");
+        assert_eq!(plan.settings["LEONIDA_KBM_GTA"], "1");
+        // Under a variable set by hand.
+        assert_eq!(plan.settings["LEONIDA_MOUSE_SENS"], "0.5");
+        assert_eq!(plan.sources["LEONIDA_MOUSE_SENS"], "environment");
+        assert!(!plan.settings.contains_key("LEONIDA_CARD_WINDOWS_MB"));
+        // Without a file, the profile's value as before.
+        let plain = resolve(&settings, gpu(), &by_hand, Some(&local)).unwrap();
+        assert_eq!(plain.settings["LEONIDA_DLSS"], "quality");
+        assert_eq!(plain.sources["LEONIDA_DLSS"], "profile:test-dlss");
+        // Graphics off: the file is left out too.
+        let off = env(&[("LEONIDA_GRAPHICS_OFF", "1")]);
+        let plan = resolve_with_saved(&settings, gpu(), &off, &saved, Some(&local)).unwrap();
+        assert!(!plan.settings.contains_key("LEONIDA_DLSS"));
+    }
+
+    #[test]
+    fn an_empty_value_in_the_settings_file_leaves_the_choice_to_the_rest() {
+        let local = local(json!([
+            { "name": "test-room", "opt_in": true,
+              "env": { "LEONIDA_TEXTURE_ROOM_PERCENT": "80" } }
+        ]));
+        let settings = GraphicsSettings {
+            profiles: Some(vec!["test-room".into()]),
+            ..Default::default()
+        };
+        let saved = env(&[
+            ("LEONIDA_TEXTURE_ROOM_PERCENT", ""),
+            ("LEONIDA_TEXTURE_STAGE_MB", " "),
+        ]);
+        let plan = resolve_with_saved(&settings, gpu(), &env(&[]), &saved, Some(&local)).unwrap();
+        assert_eq!(plan.settings["LEONIDA_TEXTURE_ROOM_PERCENT"], "80");
+        assert_eq!(plan.sources["LEONIDA_TEXTURE_ROOM_PERCENT"], "profile:test-room");
+        assert!(!plan.settings.contains_key("LEONIDA_TEXTURE_STAGE_MB"));
+        // A variable set empty by hand still empties it.
+        let by_hand = env(&[("LEONIDA_TEXTURE_ROOM_PERCENT", "")]);
+        let plan = resolve_with_saved(&settings, gpu(), &by_hand, &saved, Some(&local)).unwrap();
+        assert_eq!(plan.settings["LEONIDA_TEXTURE_ROOM_PERCENT"], "");
     }
 
     #[test]
