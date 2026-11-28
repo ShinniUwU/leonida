@@ -99,8 +99,9 @@ pub extern "system" fn UnregisterAppConstrainedChangeNotification(registration: 
 /// title's window from the others of the process.
 const TITLE_PROC: PCWSTR = w!("leonida.wndproc");
 
-/// Fullscreen, the English keyboard and the mouse capture are asked for
-/// (`=1`, or the F1 menu): left unset, the window and input stay as before.
+/// Fullscreen and the English keyboard are asked for (`=1`, or the
+/// launcher): left unset, the window and input stay as before. The mouse
+/// capture is live ([`capture_wanted`]).
 pub(super) fn enabled(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|v| v == "1")
 }
@@ -152,8 +153,29 @@ struct MouseCapture {
 static MOUSE_CAPTURE: std::sync::LazyLock<Mutex<MouseCapture>> =
     std::sync::LazyLock::new(|| Mutex::new(MouseCapture::default()));
 
+/// The title's top-level window, hooked by us (0: none yet).
+static TOP_WINDOW: AtomicUsize = AtomicUsize::new(0);
+/// Whether the capture was wanted at the input poll before.
+static CAPTURE_WANTED: AtomicBool = AtomicBool::new(false);
+
+/// `LEONIDA_MOUSE_CAPTURE` is on (live: the F1 menu turns it on and off) and
+/// the F1 menu is shut: while it is open the cursor is free for it.
+fn capture_wanted() -> bool {
+    leonida_core::switches::live_flag("LEONIDA_MOUSE_CAPTURE")
+        && !leonida_gpu::SETTINGS_MENU_OPEN.load(Ordering::Relaxed)
+}
+
+/// The message that has the window's own thread take or let go of the
+/// cursor (the cursor's show count is that thread's): a name of ours, so no
+/// message of the title's is taken for it.
+fn recheck_message() -> u32 {
+    static MESSAGE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    // SAFETY: a constant name.
+    *MESSAGE.get_or_init(|| unsafe { wm::RegisterWindowMessageW(w!("leonida.mouse-capture")) })
+}
+
 fn capture_mouse(hwnd: HWND, active: bool) {
-    if !enabled("LEONIDA_MOUSE_CAPTURE") { return; }
+    let active = active && capture_wanted();
     let mut state = MOUSE_CAPTURE.lock().unwrap_or_else(|e| e.into_inner());
     // SAFETY: runs on the window thread; local geometry, balanced cursor count.
     unsafe {
@@ -186,8 +208,25 @@ fn capture_mouse(hwnd: HWND, active: bool) {
 }
 
 pub(super) fn captured_mouse_delta() -> Option<(i64, i64)> {
-    if !enabled("LEONIDA_MOUSE_CAPTURE") { return None; }
+    let wanted = capture_wanted();
+    let window = TOP_WINDOW.load(Ordering::Relaxed);
+    if CAPTURE_WANTED.swap(wanted, Ordering::Relaxed) != wanted && window != 0 {
+        // SAFETY: a message posted to our hooked window; a gone one fails.
+        unsafe { wm::PostMessageW(window as HWND, recheck_message(), 0, 0) };
+    }
+    let menu = leonida_gpu::SETTINGS_MENU_OPEN.load(Ordering::Relaxed);
+    if !wanted && !(menu && leonida_core::switches::live_flag("LEONIDA_MOUSE_CAPTURE")) {
+        return None;
+    }
     let mut state = MOUSE_CAPTURE.lock().unwrap_or_else(|e| e.into_inner());
+    if menu {
+        // The mouse stays there for the title, still, while the menu has the
+        // cursor; the first sample after it starts from where the cursor is.
+        state.reference = None;
+        // SAFETY: plain query.
+        let front = unsafe { wm::GetForegroundWindow() } as usize;
+        return (window != 0 && front == window).then_some((0, 0));
+    }
     // SAFETY: sampling and warping serialize with capture/focus messages.
     unsafe {
         if state.window == 0 || wm::GetForegroundWindow() as usize != state.window { return None; }
@@ -352,6 +391,7 @@ fn hook(hwnd: HWND) {
         if wm::GetParent(hwnd).is_null() {
             fullscreen(hwnd);
             english_input();
+            TOP_WINDOW.store(hwnd as usize, Ordering::Relaxed);
             capture_mouse(hwnd, true);
         }
     }
@@ -365,6 +405,12 @@ extern "system" fn window_proc(
 ) -> LRESULT {
     if message == wm::WM_SETFOCUS {
         english_input();
+    }
+    if message == recheck_message() {
+        // SAFETY: plain query.
+        let active = unsafe { wm::GetForegroundWindow() } == hwnd;
+        capture_mouse(hwnd, active);
+        return 0;
     }
     match message {
         wm::WM_KILLFOCUS | wm::WM_NCDESTROY => capture_mouse(hwnd, false),
@@ -543,7 +589,9 @@ mod tests {
 
     #[test]
     fn mouse_reference_handles_focus_reset_and_warp() {
-        if !enabled("LEONIDA_MOUSE_CAPTURE") { assert_eq!(captured_mouse_delta(), None); }
+        if !leonida_core::switches::live_flag("LEONIDA_MOUSE_CAPTURE") {
+            assert_eq!(captured_mouse_delta(), None);
+        }
         let mut reference = None;
         assert_eq!(mouse_motion(&mut reference, (480, 390), None), (0, 0));
         assert_eq!(mouse_motion(&mut reference, (500, 400), None), (20, 10));

@@ -103,16 +103,19 @@ const FALLBACK_BUTTONS: [(u8, u32); 14] = [
 
 /// Where the stand-in pad's letters are on the keyboard: scan code (set 1)
 /// and the letter a US layout prints there.
-const LETTER_POSITIONS: [(u32, u8); 16] = [
+const LETTER_POSITIONS: [(u32, u8); 21] = [
     (0x10, b'Q'),
     (0x11, b'W'),
     (0x12, b'E'),
+    (0x13, b'R'),
     (0x15, b'Y'),
     (0x17, b'I'),
+    (0x19, b'P'),
     (0x1E, b'A'),
     (0x1F, b'S'),
     (0x20, b'D'),
     (0x21, b'F'),
+    (0x22, b'G'),
     (0x23, b'H'),
     (0x24, b'J'),
     (0x25, b'K'),
@@ -120,7 +123,78 @@ const LETTER_POSITIONS: [(u32, u8); 16] = [
     (0x2C, b'Z'),
     (0x2D, b'X'),
     (0x2E, b'C'),
+    (0x2F, b'V'),
+    (0x32, b'M'),
 ];
+
+/// GTA V PC-style keys for the stand-in pad (`LEONIDA_KBM_GTA`): the left
+/// stick stays W/A/S/D and the right stick I/J/K/L; the triggers are the
+/// mouse's buttons (right: LT, left: RT), and the camera follows the mouse
+/// device itself. Letters count by where they are ([`pad_key`]); Shift and
+/// Ctrl as left and right keys (`0xA0..=0xA3`), as `Host::keys` reports them.
+const GTA_BUTTONS: [(u8, u32); 26] = [
+    (0x1B, MENU),           // Esc
+    (b'P', MENU),           // Pause / Map
+    (b'V', VIEW),           // Change camera
+    (0xA0, A),              // Left Shift: Sprint
+    (0xA1, A),              // Right Shift: Sprint
+    (0x0D, A),              // Enter: Confirm (menus)
+    (0x20, X),              // Space: Jump / Climb
+    (b'X', X),              // X fallback
+    (b'R', B),              // Reload / Melee
+    (0x08, B),              // Backspace: Back (menus)
+    (b'F', Y),              // Enter / Exit vehicle
+    (0x09, LEFT_SHOULDER),  // Tab: Weapon wheel
+    (b'Q', RIGHT_SHOULDER), // Cover / Handbrake
+    (0xA2, LEFT_STICK),     // Left Ctrl: Crouch / Horn
+    (0xA3, LEFT_STICK),     // Right Ctrl: Crouch / Horn
+    (b'C', RIGHT_STICK),    // Look behind
+    (0x14, RIGHT_STICK),    // Caps Lock: Special
+    (b'H', RIGHT_STICK),    // H fallback
+    (b'E', RIGHT),          // Interact
+    (0x27, RIGHT),          // Right arrow
+    (0x26, UP),             // Up arrow: Phone
+    (b'M', UP),             // Phone / Menu
+    (0x28, DOWN),           // Down arrow: Character wheel
+    (b'Z', DOWN),           // Minimap / Character wheel
+    (0x25, LEFT),           // Left arrow
+    (b'G', LEFT),           // Throw / Context left
+];
+
+// The controls switches below are live (`leonida_core::switches`): read at
+// every poll, so the F1 menu changes them while the game runs.
+
+/// The GTA V keys (`LEONIDA_KBM_GTA`, off by default).
+fn gta_kbm() -> bool {
+    leonida_core::switches::live_flag("LEONIDA_KBM_GTA")
+}
+
+/// How far the mouse device moves for each step of the cursor
+/// (`LEONIDA_MOUSE_SENS`, 1 by default).
+#[cfg(windows)]
+fn mouse_sens() -> f64 {
+    leonida_core::switches::live_number("LEONIDA_MOUSE_SENS")
+}
+
+/// The mouse device's up and down the other way round
+/// (`LEONIDA_MOUSE_INVERT_Y`).
+#[cfg(windows)]
+fn mouse_invert_y() -> bool {
+    leonida_core::switches::live_flag("LEONIDA_MOUSE_INVERT_Y")
+}
+
+/// The cursor's steps `(dx, dy)` as the mouse device's, `sens` times as far
+/// (what is left over of a step carried in `rest`), `dy` turned round with
+/// `invert_y`. Sensitivity 1 without inverting gives the steps unchanged.
+#[cfg(any(windows, test))]
+fn scaled((dx, dy): (i64, i64), sens: f64, invert_y: bool, rest: &mut (f64, f64)) -> (i64, i64) {
+    let sens = if sens.is_finite() && sens > 0.0 { sens } else { 1.0 };
+    let dy = if invert_y { -dy } else { dy };
+    let x = rest.0 + dx as f64 * sens;
+    let y = rest.1 + dy as f64 * sens;
+    *rest = (x.fract(), y.fract());
+    (x.trunc() as i64, y.trunc() as i64)
+}
 
 /// The scan code of the stand-in pad's letter `vk` on a US layout.
 fn letter_position(vk: u8) -> Option<u32> {
@@ -224,7 +298,13 @@ trait Source: Send {
     fn rumble(&mut self, slot: usize, low: u16, high: u16);
 }
 
-fn fallback(keys: &[KeyState]) -> PadState {
+/// The stand-in pad of the keys held and the mouse's buttons (bit 0 left,
+/// bit 1 right; the triggers with the GTA V keys only).
+fn fallback(keys: &[KeyState], mouse_buttons: u32) -> PadState {
+    fallback_for(keys, gta_kbm(), mouse_buttons)
+}
+
+fn fallback_for(keys: &[KeyState], gta: bool, mouse_buttons: u32) -> PadState {
     let on = |vk: u8| {
         if keys.iter().any(|k| pad_key(k) == vk) {
             1.0
@@ -232,13 +312,15 @@ fn fallback(keys: &[KeyState]) -> PadState {
             0.0
         }
     };
+    let click = |bit: u32| if mouse_buttons & bit != 0 { 1.0 } else { 0.0 };
+    let table: &[(u8, u32)] = if gta { &GTA_BUTTONS } else { &FALLBACK_BUTTONS };
     PadState {
-        buttons: FALLBACK_BUTTONS
+        buttons: table
             .iter()
             .filter(|(vk, _)| on(*vk) != 0.0)
             .fold(0, |all, (_, bit)| all | bit),
-        left_trigger: on(b'Z'),
-        right_trigger: on(b'C'),
+        left_trigger: if gta { click(2) } else { on(b'Z') },
+        right_trigger: if gta { click(1) } else { on(b'C') },
         left_x: on(b'D') - on(b'A'),
         left_y: on(b'W') - on(b'S'),
         right_x: on(b'L') - on(b'J'),
@@ -597,9 +679,10 @@ impl State {
     ) -> Vec<Event> {
         let now = now();
         let mut events = std::mem::take(&mut self.pending);
+        let clicks = mouse.map_or(0, |m| m.buttons);
         self.update(devices, MOUSE, mouse.map(Value::Mouse), now, &mut events);
         if one_pad {
-            let pad = pads.into_iter().flatten().fold(fallback(&keys), merged);
+            let pad = pads.into_iter().flatten().fold(fallback(&keys, clicks), merged);
             self.update(devices, FALLBACK, Some(Value::Pad(pad)), now, &mut events);
             self.update(devices, KEYBOARD, Some(Value::Keys(keys)), now, &mut events);
             return events;
@@ -608,7 +691,7 @@ impl State {
         for (slot, pad) in pads.into_iter().enumerate() {
             self.update(devices, slot, pad.map(Value::Pad), now, &mut events);
         }
-        let fallback = (!any_pad).then(|| Value::Pad(fallback(&keys)));
+        let fallback = (!any_pad).then(|| Value::Pad(fallback(&keys, clicks)));
         self.update(devices, FALLBACK, fallback, now, &mut events);
         self.update(devices, KEYBOARD, Some(Value::Keys(keys)), now, &mut events);
         events
@@ -1311,6 +1394,8 @@ mod host {
         latched: bool,
         /// The left button was down at the last poll with the menu open.
         click_was_down: bool,
+        /// What is left over of the mouse's steps after `scaled`.
+        mouse_rest: (f64, f64),
     }
 
     impl Host {
@@ -1379,6 +1464,9 @@ mod host {
                     // SAFETY: virtual-key state query.
                     .fold(0, |bits, (i, vk)| bits | ((unsafe { GetAsyncKeyState(vk) } < 0) as u32) << i)
             };
+            // Sensitivity and inverted Y (the F1 menu's CONTROLS tab) apply to
+            // the mouse device the camera follows.
+            let delta = super::scaled(delta, mouse_sens(), mouse_invert_y(), &mut self.mouse_rest);
             Some(super::apply_mouse_sample(&mut self.mouse, delta, buttons, menu_open))
         }
         fn pad(&mut self, slot: usize) -> Option<PadState> {
@@ -1966,17 +2054,50 @@ mod tests {
     fn the_stand_in_pad_reads_letters_by_their_place() {
         // An AZERTY keyboard: the key above S is marked Z, the one left of S is Q.
         let at = |scan_code, virtual_key| KeyState { scan_code, virtual_key, ..Default::default() };
-        let pad = fallback(&[at(0x11, b'Z'), at(0x1E, b'Q')]);
+        let pad = fallback_for(&[at(0x11, b'Z'), at(0x1E, b'Q')], false, 0);
         assert_eq!((pad.left_x, pad.left_y, pad.left_trigger), (-1.0, 1.0, 0.0));
         // Its key marked W is in the bottom row, where the left trigger is; the one marked A is
         // the left shoulder's.
-        let pad = fallback(&[at(0x2C, b'W'), at(0x10, b'A')]);
+        let pad = fallback_for(&[at(0x2C, b'W'), at(0x10, b'A')], false, 0);
         assert_eq!((pad.left_x, pad.left_y, pad.left_trigger), (0.0, 0.0, 1.0));
         assert_eq!(pad.buttons, LEFT_SHOULDER);
         // A letter in none of the pad's places presses nothing (Dvorak's S, right of L).
-        assert_eq!(fallback(&[at(0x27, b'S')]), PadState::default());
+        assert_eq!(fallback_for(&[at(0x27, b'S')], false, 0), PadState::default());
         // Keys that are no letters are the same on every layout.
-        assert_eq!(fallback(&[at(0x1C, 0x0D)]).buttons, A);
+        assert_eq!(fallback_for(&[at(0x1C, 0x0D)], false, 0).buttons, A);
+    }
+
+    #[test]
+    fn the_gta_keys_read_letters_by_their_place_and_clicks_as_triggers() {
+        let at = |scan_code, virtual_key| KeyState { scan_code, virtual_key, ..Default::default() };
+        // US places of P, V, R, M and G, whatever the layout prints there.
+        for (scan, button) in [(0x19, MENU), (0x2F, VIEW), (0x13, B), (0x32, UP), (0x22, LEFT)] {
+            assert_eq!(fallback_for(&[at(scan, b'?')], true, 0).buttons, button, "{scan:#x}");
+        }
+        // Left Shift sprints; Space jumps.
+        let pad = fallback_for(&[at(0x2A, 0xA0), at(0x39, 0x20)], true, 0);
+        assert_eq!(pad.buttons, A | X);
+        // The right button aims (LT), the left one shoots (RT); not without the GTA keys.
+        let pad = fallback_for(&[], true, 0b11);
+        assert_eq!((pad.left_trigger, pad.right_trigger), (1.0, 1.0));
+        assert_eq!(fallback_for(&[], false, 0b11), PadState::default());
+        // Z and C are no triggers with the GTA keys.
+        let pad = fallback_for(&[at(0x2C, b'Z'), at(0x2E, b'C')], true, 0);
+        assert_eq!((pad.left_trigger, pad.right_trigger), (0.0, 0.0));
+        assert_eq!(pad.buttons, DOWN | RIGHT_STICK);
+    }
+
+    #[test]
+    fn mouse_steps_scale_and_invert() {
+        let mut rest = (0.0, 0.0);
+        assert_eq!(scaled((10, -4), 1.0, false, &mut rest), (10, -4));
+        assert_eq!(scaled((10, -4), 1.0, true, &mut rest), (10, 4));
+        assert_eq!(scaled((3, 3), 0.5, false, &mut rest), (1, 1));
+        // The halves left over make a step the next time.
+        assert_eq!(scaled((1, 1), 0.5, false, &mut rest), (1, 1));
+        assert_eq!(rest, (0.0, 0.0));
+        // A sensitivity that is no number moves as 1.
+        assert_eq!(scaled((2, 2), f64::NAN, false, &mut rest), (2, 2));
     }
 
     #[test]

@@ -136,7 +136,8 @@ const LIST: &[Switch] = &[
     Switch {
         name: "LEONIDA_KBM_GTA",
         label: "GTA V KEYS AND MOUSE",
-        help: "Keyboard and mouse laid out like GTA V on PC. F2 turns mouse look on and off.",
+        help: "Keys laid out like GTA V on PC; the mouse buttons aim and shoot. The mouse \
+               needs MOUSE CAPTURE on.",
         group: Group::Controls,
         values: OFF_ON,
         default: "0",
@@ -145,7 +146,7 @@ const LIST: &[Switch] = &[
     Switch {
         name: "LEONIDA_MOUSE_SENS",
         label: "MOUSE SENSITIVITY",
-        help: "How fast mouse look turns the camera with the GTA V keys.",
+        help: "How fast the mouse turns the camera (with MOUSE CAPTURE on).",
         group: Group::Controls,
         values: &[c("0.25", "0.25"), c("0.5", "0.5"), c("0.75", "0.75"), c("1", "1.0"),
                   c("1.25", "1.25"), c("1.5", "1.5"), c("2", "2.0"), c("3", "3.0")],
@@ -155,7 +156,7 @@ const LIST: &[Switch] = &[
     Switch {
         name: "LEONIDA_MOUSE_INVERT_Y",
         label: "INVERT MOUSE Y",
-        help: "Mouse look up and down the other way round.",
+        help: "The mouse turns the camera up and down the other way round.",
         group: Group::Controls,
         values: OFF_ON,
         default: "0",
@@ -164,8 +165,8 @@ const LIST: &[Switch] = &[
     Switch {
         name: "LEONIDA_MOUSE_CAPTURE",
         label: "MOUSE CAPTURE",
-        help: "Keeps the cursor inside the game's window while it is in front. With the GTA V \
-               keys, mouse look turns on with it.",
+        help: "Keeps the cursor hidden inside the game's window while it is in front, and \
+               gives the game a mouse to turn the camera with. F1 frees the cursor.",
         group: Group::Controls,
         values: OFF_ON,
         default: "0",
