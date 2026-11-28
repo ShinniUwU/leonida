@@ -519,10 +519,17 @@ pub fn set_for_next_start(name: &str, value: &str) -> bool {
 }
 
 /// Writes what [`set`] chose into the settings file once `quiet` has passed
-/// since the last change (the menu calls it at every frame). None: nothing to
-/// write, or not yet.
+/// since the last change. None: nothing to write, or not yet.
 pub fn save_due(quiet: Duration) -> Option<Result<PathBuf>> {
     save(|since| since.elapsed() >= quiet)
+}
+
+/// Whether [`save_due`] would write now (the menu asks at every frame),
+/// without waiting for a save under way.
+pub fn save_is_due(quiet: Duration) -> bool {
+    chosen()
+        .unsaved_since
+        .is_some_and(|since| since.elapsed() >= quiet)
 }
 
 /// Writes what [`set`] chose into the settings file now, if some of it is not

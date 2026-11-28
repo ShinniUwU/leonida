@@ -19,6 +19,7 @@
 //! keys go to the game; `LEONIDA_MENU_OPEN=1` opens the menu at the start.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
@@ -495,7 +496,7 @@ pub fn input(pressed: &[u8]) -> bool {
             Do::Closed => {
                 tracing::info!("settings menu closed");
                 state.hits = None;
-                saved(switches::save_now());
+                save_aside(switches::save_now);
             }
             Do::Panel => {
                 let on = switches::live_flag("LEONIDA_PANEL");
@@ -554,7 +555,33 @@ fn change(s: &Switch, how: How) {
 /// At every frame shown: the settings file is written once changes have been
 /// quiet for a while.
 pub(crate) fn save_when_quiet() {
-    saved(switches::save_due(QUIET));
+    if switches::save_is_due(QUIET) {
+        save_aside(|| switches::save_due(QUIET));
+    }
+}
+
+/// A save runs on its thread.
+static SAVING: AtomicBool = AtomicBool::new(false);
+
+/// Runs `save` on a thread of its own, one at a time: waiting for the
+/// launcher's lock on the file, or for a program that holds it open, must not
+/// hold up a frame or the menu's keys. A change it misses is saved once quiet.
+fn save_aside<E: std::fmt::Display>(
+    save: impl FnOnce() -> Option<Result<PathBuf, E>> + Send + 'static,
+) {
+    if SAVING.swap(true, Ordering::Acquire) {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("leonida-settings-save".into())
+        .spawn(move || {
+            saved(save());
+            SAVING.store(false, Ordering::Release);
+        });
+    if let Err(e) = spawned {
+        SAVING.store(false, Ordering::Release);
+        tracing::warn!(error = %e, "settings not saved: no thread to write them");
+    }
 }
 
 fn saved<E: std::fmt::Display>(result: Option<Result<PathBuf, E>>) {
