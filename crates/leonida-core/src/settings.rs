@@ -56,6 +56,11 @@ pub fn wanted(env: &Environment) -> bool {
     !set("LEONIDA_SAVED_SETTINGS", "0") && !set("LEONIDA_GRAPHICS_OFF", "1")
 }
 
+/// Live switches the start reads too, refusing a value it does not know (leonida-gpu
+/// streamline.rs `Asked::from_env` stops on a DLSS model not listed): the file's value must be
+/// one of the switch's values or labels, as for a restart switch.
+const READ_AT_START: &[&str] = &["LEONIDA_DLSS_PRESET"];
+
 /// The switches the file's text sets, and a line for each entry left out.
 pub fn parse(text: &str) -> Result<(Environment, Vec<String>)> {
     let file: File = serde_json::from_str(text).context("not a settings file")?;
@@ -75,10 +80,18 @@ pub fn parse(text: &str) -> Result<(Environment, Vec<String>)> {
         };
         // A restart switch's reader may refuse a value it does not know and stop the start
         // (LEONIDA_DLSS does), which the F1 menu could not undo. Empty leaves it to profiles.
-        if !switch.live
-            && !value.trim().is_empty()
-            && !switch.values.iter().any(|c| c.value == value)
-        {
+        let known = if !switch.live {
+            switch.values.iter().any(|c| c.value == value)
+        } else if READ_AT_START.contains(&switch.name) {
+            let value = value.trim();
+            switch
+                .values
+                .iter()
+                .any(|c| c.value == value || c.label.eq_ignore_ascii_case(value))
+        } else {
+            true
+        };
+        if !value.trim().is_empty() && !known {
             notes.push(format!("{name}={value} is not one of its values: left out"));
         } else if value.contains('\0') {
             notes.push(format!("{name} contains a NUL character: left out"));
@@ -318,6 +331,20 @@ mod tests {
         );
         assert_eq!(notes.len(), 1, "{notes:?}");
         assert!(notes[0].starts_with("LEONIDA_DLSS=on"));
+    }
+
+    #[test]
+    fn a_dlss_model_the_start_would_refuse_is_left_out() {
+        let text = r#"{"version":1,"switches":{"LEONIDA_DLSS_PRESET":"7",
+            "LEONIDA_FRAME_INTERVAL_US":"25000"}}"#;
+        let (switches, notes) = parse(text).unwrap();
+        assert_eq!(switches, env(&[("LEONIDA_FRAME_INTERVAL_US", "25000")]));
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].starts_with("LEONIDA_DLSS_PRESET=7"));
+        for kept in ["11", "k", " K ", "default", ""] {
+            let text = format!(r#"{{"version":1,"switches":{{"LEONIDA_DLSS_PRESET":"{kept}"}}}}"#);
+            assert_eq!(parse(&text).unwrap().1, Vec::<String>::new(), "{kept:?}");
+        }
     }
 
     #[test]
