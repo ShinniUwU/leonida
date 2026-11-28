@@ -17,6 +17,8 @@
 
 pub mod adapter;
 #[cfg(windows)]
+mod ahead;
+#[cfg(windows)]
 mod ambient;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod capture;

@@ -14,7 +14,7 @@ tracing.workspace = true
 anyhow.workspace = true
 leonida-formats.workspace = true
 leonida-pipeline.workspace = true
-leonida-shader.workspace = true
+leonida-shader = { workspace = true, features = ["host"] }
 
 [build-dependencies]
 blake3.workspace = true

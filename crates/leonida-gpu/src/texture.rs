@@ -752,7 +752,7 @@ pub(crate) struct Digest(u128);
 
 /// [`upload`] of the levels from `first` on, the ones a view shows: of a
 /// texture the title placed there may be no memory of the larger ones, and
-/// what lies there is another texture's. (After leonida-amd 4436f8f1.)
+/// what lies there is another texture's. (After victory-amd 4436f8f1.)
 /// Whether `list` has recorded [`upload_from`]'s upload of `resource`
 /// from level `first` (or been asked to: see [`UPLOAD_STAGED`]).
 pub(crate) fn upload_listed(list: &HostList, resource: This, first: u32) -> bool {
@@ -2570,7 +2570,7 @@ mod allocation_costs {
                 seen.push(digest(&bytes));
             }
         }
-        let text: Vec<u8> = (0..400u32).map(|i| (i * 37 >> 2) as u8).collect();
+        let text: Vec<u8> = (0..400u32).map(|i| ((i * 37) >> 2) as u8).collect();
         for at in 0..399 {
             let mut bytes = text.clone();
             bytes.swap(at, at + 1);

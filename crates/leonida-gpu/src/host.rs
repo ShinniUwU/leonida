@@ -8,7 +8,8 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use anyhow::Context;
+use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, RECT, WAIT_OBJECT_0, WPARAM};
 use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_12_0;
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
@@ -842,18 +843,39 @@ pub(crate) fn made_host() -> Option<&'static Host> {
 
 /// The host GPU, created on first use; `None` without one (a run then
 /// behaves as before: nothing executes).
+/// The most of the card's memory taken as this process's budget, in bytes, whatever the system
+/// gives (`LEONIDA_VRAM_BUDGET_MB=<n>`, 2048 at least; not given: the system's budget). The
+/// texture queue's line, the card copies of title buffers and what is kept for render targets
+/// are all sized from the budget, so a smaller one leaves the rest of the card to other
+/// programs, and keeps a card with little memory from being filled to the point where the
+/// system moves its memory into the PC's.
+fn vram_budget_cap() -> Option<u64> {
+    static CAP: OnceLock<Option<u64>> = OnceLock::new();
+    *CAP.get_or_init(|| {
+        let mb = std::env::var("LEONIDA_VRAM_BUDGET_MB").ok()?.trim().parse::<u64>().ok()?;
+        let mb = mb.max(2048);
+        tracing::info!(mb, "the card's memory: no more than this is taken as the budget (LEONIDA_VRAM_BUDGET_MB)");
+        Some(mb << 20)
+    })
+}
+
+/// The host if it has been made (never makes it).
+pub(crate) fn host_made() -> Option<&'static Host> {
+    HOST.get().and_then(|h| h.as_ref())
+}
+
 pub(crate) fn host() -> Option<&'static Host> {
     HOST.get_or_init(|| match create() {
         Ok(host) => Some(host),
         Err(e) => {
-            tracing::warn!(error = %e, "no host D3D12 device; command lists will not run");
+            tracing::warn!(error = %format_args!("{e:#}"), "no host D3D12 device; command lists will not run");
             None
         }
     })
     .as_ref()
 }
 
-fn create() -> windows::core::Result<Host> {
+fn create() -> anyhow::Result<Host> {
     // SAFETY: plain D3D12 object creation with valid descriptions.
     unsafe {
         // The debug layer only in builds with diagnostics.
@@ -907,18 +929,41 @@ fn create() -> windows::core::Result<Host> {
         // is an access violation in this process (a crash report with the
         // address and instruction) instead of a GPU fault and driver reset.
         if cfg!(feature = "diagnostics") && crate::switch::on("LEONIDA_D3D12_WARP") {
-            let adapter = warp_adapter()?;
-            D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device)?;
+            let adapter = warp_adapter().context("selecting the WARP adapter")?;
+            D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device)
+                .context("D3D12CreateDevice(WARP, FL 12_0, ID3D12Device)")?;
             tracing::info!("host device on the software adapter (WARP)");
         } else {
-            D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device)?;
+            // The card the monitor is on, else the one with the most memory (or the one
+            // LEONIDA_ADAPTER names), not Windows' first adapter, which is
+            // often an integrated GPU.
+            if let Some((adapter, name, own)) = leonida_shader::emit::host::hardware_adapter()
+                && D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device)
+                    .inspect_err(|e| tracing::warn!(adapter = %name, error = %e, "D3D12CreateDevice(selected adapter, FL 12_0, ID3D12Device) failed"))
+                    .is_ok()
+            {
+                tracing::info!(adapter = %name, own_memory_mb = own >> 20, "host device on the card the monitor is on, else the one with the most memory of its own (LEONIDA_ADAPTER names another)");
+            }
+            if device.is_none() {
+                D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device)
+                    .context("D3D12CreateDevice(default adapter, FL 12_0, ID3D12Device)")?;
+            }
             // Whether a GPU hang ends the run or freezes the PC (#1054).
             crate::tdr::log();
         }
-        let device = device.ok_or_else(windows::core::Error::empty)?;
+        let device = device
+            .ok_or_else(windows::core::Error::empty)
+            .context("D3D12CreateDevice returned an empty device")?;
+        require_direct_heaps(&device);
         // Before anything is made with it (`LEONIDA_RECORD`).
         #[cfg(feature = "diagnostics")]
         crate::replay::record::from_env(&device);
+        // Before anything else has a static sampler (`pipeline::samplers`): the
+        // first thing made with the device, in the run as in the tools. Made
+        // after Streamline had the device (DLSS loaded, in the run only), the
+        // run drew a white-painted material black with the pipelines `leonida
+        // warm` had compiled (launcher run rel4, 2026-11-27).
+        crate::pipeline::samplers::prime(&device);
         // `LEONIDA_D3D12_BACKGROUND=0`: the runtime's background work (the
         // driver compiling shaders again on the "D3D Background Thread"s,
         // for minutes after pipelines were made or loaded) is switched off.
@@ -973,26 +1018,32 @@ fn create() -> windows::core::Result<Host> {
         // its device proxy.
         let queue: ID3D12CommandQueue = match crate::streamline::device_made(&device) {
             Some(queue) => queue,
-            None => device.CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC {
-                Type: D3D12_COMMAND_LIST_TYPE_DIRECT,
-                ..Default::default()
-            })?,
+            None => device
+                .CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC {
+                    Type: D3D12_COMMAND_LIST_TYPE_DIRECT,
+                    ..Default::default()
+                })
+                .context("CreateCommandQueue(DIRECT)")?,
         };
-        let fence: ID3D12Fence = device.CreateFence(0, D3D12_FENCE_FLAG_NONE)?;
-        let event = CreateEventW(None, false, false, None)?;
-        let rtvs: ID3D12DescriptorHeap =
-            device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
+        let fence: ID3D12Fence = device
+            .CreateFence(0, D3D12_FENCE_FLAG_NONE)
+            .context("CreateFence")?;
+        let event = CreateEventW(None, false, false, None).context("CreateEventW")?;
+        let rtvs: ID3D12DescriptorHeap = device
+            .CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
                 Type: D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
                 NumDescriptors: RTV_RING,
                 ..Default::default()
-            })?;
+            })
+            .context("CreateDescriptorHeap(RTV)")?;
         let rtv_size = device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-        let dsvs: ID3D12DescriptorHeap =
-            device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
+        let dsvs: ID3D12DescriptorHeap = device
+            .CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
                 Type: D3D12_DESCRIPTOR_HEAP_TYPE_DSV,
                 NumDescriptors: RTV_RING,
                 ..Default::default()
-            })?;
+            })
+            .context("CreateDescriptorHeap(DSV)")?;
         let dsv_size = device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
         let adapter = CreateDXGIFactory2::<IDXGIFactory4>(DXGI_CREATE_FACTORY_FLAGS(0))
             .and_then(|factory| factory.EnumAdapterByLuid::<IDXGIAdapter3>(device.GetAdapterLuid()))
@@ -1238,7 +1289,10 @@ const BATCHES: u32 = 8;
 
 /// A host command list and its allocator, always used together.
 pub(crate) struct HostList {
-    allocator: ID3D12CommandAllocator,
+    /// Its command allocator and when it was made ([`now_ms`]): with
+    /// [`allocator_trim`] a reset now and then takes a new one, and the old
+    /// one, which keeps the most memory its list ever recorded into it, goes.
+    allocator: Mutex<(ID3D12CommandAllocator, u64)>,
     pub(crate) list: ID3D12GraphicsCommandList,
     /// Work for submission time, in recorded order.
     deferred: Mutex<Deferred>,
@@ -1255,9 +1309,11 @@ pub(crate) struct HostList {
     /// What the list does with depth textures that have a colour twin, by
     /// twin ([`TwinUse`]).
     twins: Mutex<std::collections::HashMap<usize, TwinUse>>,
-    /// The list that runs those transitions just before this one, made
-    /// when the list first has such transitions ([`lazy_prelude`]).
-    prelude: OnceLock<Option<Prelude>>,
+    /// The list that runs those transitions just before this one: taken
+    /// from [`PRELUDES`] when a submission of the list first needs one, given
+    /// back when the list is reset (every submission of it has run).
+    /// With it, when its allocator was made ([`allocator_trim`]).
+    prelude: Mutex<Option<(Prelude, u64)>>,
     /// The pipelines the list binds, for reports of slow submissions.
     pipelines: std::sync::Arc<Mutex<std::collections::BTreeSet<String>>>,
     /// What its indirect executions ran, for the report of a removed device.
@@ -1265,8 +1321,9 @@ pub(crate) struct HostList {
     indirects: indirects::Shared,
     /// The work its indirect executions may still do (`indirect`): a
     /// shader-writable word, zeroed when the list is submitted, and after
-    /// it what the clamp notes about mesh records. In memory the CPU maps.
-    budget: OnceLock<Option<(ID3D12Resource, usize)>>,
+    /// it what the clamp notes about mesh records. In memory the CPU maps:
+    /// a buffer of its own, or with [`budget::budget_pack`] a slot of a shared one.
+    budget: OnceLock<Option<Budget>>,
     /// The same words in the card's own memory ([`card_budget`]), which the
     /// clamp uses instead when there is one: zeroed in the list before its
     /// first clamp, its notes copied to `budget` when the list closes.
@@ -1315,6 +1372,35 @@ pub(crate) struct HostList {
 
 /// A list's prelude: an allocator and a closed list.
 type Prelude = (ID3D12CommandAllocator, ID3D12GraphicsCommandList);
+
+/// Preludes no list holds. Each host list kept its own from its first
+/// submission that needed one until the list went: 1,140 alive in a
+/// 25-minute run (leak3), beside 1,526 lists, each pair of an allocator and
+/// a list costing the driver about 2.9 MB of the PC's memory at creation. A
+/// prelude is used only while its list's submission runs, so a list takes
+/// one then and gives it back at its reset; the lists in the air hold
+/// theirs. `LEONIDA_PRELUDE_POOL=0`: each list keeps its own, as before.
+/// (Each with when its allocator was made, for [`allocator_trim`].)
+static PRELUDES: Mutex<Vec<(Prelude, u64)>> = Mutex::new(Vec::new());
+
+impl Drop for HostList {
+    fn drop(&mut self) {
+        if self.prelude.get_mut().unwrap_or_else(|e| e.into_inner()).is_some() {
+            PRELUDES_ALIVE.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// The most preludes [`PRELUDES`] keeps.
+const PRELUDES_KEPT: usize = 256;
+
+fn prelude_pool() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("LEONIDA_PRELUDE_POOL").is_none_or(|v| v != "0"))
+}
+
+/// Preludes alive (held by a list or kept), for the memory line.
+pub(crate) static PRELUDES_ALIVE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Whether the new host list each of the title's lists gets when it is
 /// submitted is left open for the title's next reset ([`HostList::leave_open`];
@@ -1998,18 +2084,40 @@ fn scratch_pool() -> bool {
 struct Spare<T> {
     kept: Vec<(T, u64)>,
     bytes: u64,
+    /// The fewest bytes kept since the last [`Spare::trim`]: kept all that
+    /// while and never asked for (memory stack by skornuta,
+    /// skornuta/victory-memory-stack 57fb136, GPL-3.0).
+    low: u64,
 }
 
 impl<T> Spare<T> {
     const fn new() -> Self {
-        Spare { kept: Vec::new(), bytes: 0 }
+        Spare { kept: Vec::new(), bytes: 0, low: 0 }
     }
 
     /// A kept thing of `size` bytes, the one given last.
     fn take(&mut self, size: u64) -> Option<T> {
         let at = self.kept.iter().rposition(|(_, s)| *s == size)?;
         self.bytes -= size;
+        self.low = self.low.min(self.bytes);
         Some(self.kept.remove(at).0)
+    }
+
+    /// With [`allocator_trim`]: takes out the oldest things kept, up to the
+    /// fewest bytes kept since the last trim (none of those was asked for in
+    /// all that time), to be freed. The first trim knows no window yet and
+    /// takes nothing.
+    fn trim(&mut self) -> Vec<(T, u64)> {
+        let mut out = Vec::new();
+        let mut left = self.low;
+        while let Some(at) = self.kept.iter().position(|(_, s)| *s <= left) {
+            let (thing, size) = self.kept.remove(at);
+            left -= size;
+            self.bytes -= size;
+            out.push((thing, size));
+        }
+        self.low = self.bytes;
+        out
     }
 
     /// Keeps `thing` (`size` bytes) unless that takes the kept bytes past
@@ -2081,9 +2189,32 @@ fn give_chunks(chunks: Vec<(Chunk, u64)>) {
             }
         }
     }
+    // With `LEONIDA_ALLOCATOR_TRIM=1`, every ten seconds: the chunks kept all
+    // that while and never taken go too (memory stack by skornuta,
+    // skornuta/victory-memory-stack 57fb136, GPL-3.0). No list holds them.
+    if allocator_trim().is_some() {
+        static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let now = now_ms();
+        let last = LAST.load(Ordering::Relaxed);
+        if now >= last + 10_000 && LAST.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+            let trimmed = SPARE.lock().unwrap_or_else(|e| e.into_inner()).trim();
+            for (chunk, size) in trimmed {
+                ALIVE[3].fetch_sub(1, Ordering::Relaxed);
+                ALIVE[4].fetch_sub(size, Ordering::Relaxed);
+                ALIVE[1].fetch_sub(1, Ordering::Relaxed);
+                ALIVE[2].fetch_sub(size, Ordering::Relaxed);
+                SPARE_TRIMMED.fetch_add(size, Ordering::Relaxed);
+                freed.push(chunk);
+            }
+        }
+    }
     // Freed outside the lock.
     drop(freed);
 }
+
+/// Bytes of spare scratch chunks freed by the trim ([`allocator_trim`])
+/// since the start.
+pub(crate) static SPARE_TRIMMED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Drops spare scratch chunks kept idle when host memory is pressured.
 fn trim_spare_chunks() {
@@ -2093,6 +2224,7 @@ fn trim_spare_chunks() {
             return;
         }
         spare.bytes = 0;
+        spare.low = 0;
         std::mem::take(&mut spare.kept)
     };
     let count = freed.len() as u64;
@@ -2786,6 +2918,9 @@ struct Flight {
 }
 
 /// One thing in the line of what waits for the card, in order.
+// A flight is far larger than the other variants; boxing it would add an
+// allocation per flight on the submission path, so it stays inline.
+#[allow(clippy::large_enum_variant)]
 enum Late {
     Run(Flight),
     /// A bottom-of-pipe write of the flight before it: address, what, bytes.
@@ -3012,7 +3147,7 @@ fn blame_stale(stale: &[(std::sync::Arc<crate::shadow::Shadow>, usize, usize)]) 
 /// title memory read, took `us`.
 #[cfg(feature = "diagnostics")]
 fn blamed(why: usize, us: u64) {
-    let (named, refused) = std::mem::replace(&mut *BLAMED.lock().unwrap_or_else(|e| e.into_inner()), (None, ""));
+    let (named, refused) = std::mem::take(&mut *BLAMED.lock().unwrap_or_else(|e| e.into_inner()));
     let (key, at) = match (why, named) {
         (WHY_READ | WHY_STALE, Some(named)) => named,
         (WHY_READ, None) => (("a host copy of what a copy done on the card wrote", refused, 0, 0, 0), 0),
@@ -3426,6 +3561,49 @@ fn land() {
     }
 }
 
+#[cfg(test)]
+#[test]
+fn host_fence_completion_rejects_removed_device() {
+    assert!(!fence_reached(u64::MAX, 1));
+    assert!(!fence_reached(6, 7));
+    assert!(fence_reached(7, 7));
+    assert!(fence_reached(8, 7));
+}
+
+/// Whether a fence's completed value shows `target` run. `u64::MAX` is not
+/// a value the card reaches: it is what `GetCompletedValue` answers when the
+/// device is gone.
+fn fence_reached(completed: u64, target: u64) -> bool {
+    completed != u64::MAX && completed >= target
+}
+
+/// Waits for `target` on `fence` and reports what went wrong instead of
+/// carrying on: a failed wait used to fall through to the landing step with
+/// nothing run, settling flights off an unsent fence value, and a lost
+/// device (a completed value of `u64::MAX`) made every wait pass at once.
+///
+/// # Safety
+///
+/// `event` is the calling thread's own, never closed while it waits.
+unsafe fn wait_host_fence(fence: &ID3D12Fence, target: u64, event: HANDLE, context: &str) {
+    // SAFETY: the caller's fence and event, alive for the whole wait.
+    if let Err(e) = unsafe { fence.SetEventOnCompletion(target, event) } {
+        fail(format_args!(
+            "{context}: SetEventOnCompletion({target}) failed: {e}"
+        ));
+    }
+    let status = unsafe { WaitForSingleObject(event, INFINITE) };
+    if status != WAIT_OBJECT_0 {
+        fail(format_args!("{context}: fence wait failed: {status:?}"));
+    }
+    let completed = unsafe { fence.GetCompletedValue() };
+    if !fence_reached(completed, target) {
+        fail(format_args!(
+            "{context}: fence {completed} did not reach {target}"
+        ));
+    }
+}
+
 /// The thread that settles the flights once the card has run them all
 /// ([`late`]): without it a bottom-of-pipe write would reach the title only
 /// at the next call that settles, and a title thread that polls such a
@@ -3465,14 +3643,10 @@ fn late_helper() {
         };
         // The card first, without the submission lock: the submitting
         // thread prepares and sends meanwhile.
+        #[cfg(feature = "diagnostics")]
+        let _card = crate::timeline::card_wait(Some(target));
         // SAFETY: our fence and event.
-        unsafe {
-            if host.fence.SetEventOnCompletion(target, event).is_ok() {
-                #[cfg(feature = "diagnostics")]
-                let _card = crate::timeline::card_wait(Some(target));
-                WaitForSingleObject(event, INFINITE);
-            }
-        }
+        unsafe { wait_host_fence(&host.fence, target, event, "late helper") };
         {
             let mut submitted = host.submitted.lock().unwrap_or_else(|e| e.into_inner());
             // Something newer went up meanwhile: the card is waited for
@@ -3630,14 +3804,7 @@ fn relay_worker() {
                 #[cfg(feature = "diagnostics")]
                 let _card = crate::timeline::card_wait(Some(target));
                 // SAFETY: the host's fence and this thread's event.
-                let waited = unsafe {
-                    host.fence.SetEventOnCompletion(target, event).map(|()| {
-                        WaitForSingleObject(event, INFINITE);
-                    })
-                };
-                if waited.is_err() {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
+                unsafe { wait_host_fence(&host.fence, target, event, "relay") };
                 RELAY_STATS[2].fetch_add(waiting.elapsed().as_micros() as u64, Ordering::Relaxed);
             }
         }
@@ -3851,7 +4018,10 @@ fn late_line(frames: f64) {
 
 pub(crate) mod aside;
 pub(crate) mod awake;
+mod budget;
+use budget::Budget;
 mod card_steps;
+#[cfg(feature = "diagnostics")]
 pub(crate) mod indirects;
 mod font;
 mod menu;
@@ -3862,6 +4032,9 @@ pub(crate) use send::{goes_as_words, words_under};
 #[cfg(feature = "diagnostics")]
 pub(crate) mod spans;
 mod torn;
+mod trim;
+pub(crate) use trim::allocator_trim;
+use trim::{ALLOCATOR_TRIMS, allocator_refresh};
 #[cfg(feature = "diagnostics")]
 mod traffic;
 pub(crate) mod two_queues;
@@ -4216,7 +4389,10 @@ impl Host {
         };
         LISTS[1].fetch_add(1, Ordering::Relaxed);
         match made {
-            Ok(prelude) => Some(prelude),
+            Ok(prelude) => {
+                PRELUDES_ALIVE.fetch_add(1, Ordering::Relaxed);
+                Some(prelude)
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "no host list for a prelude");
                 None
@@ -4236,9 +4412,9 @@ impl Host {
                 &allocator,
                 None,
             )?;
-            let prelude = OnceLock::new();
+            let prelude = Mutex::new(None);
             if !lazy_prelude() {
-                let _ = prelude.set(self.make_prelude());
+                *prelude.lock().unwrap_or_else(|e| e.into_inner()) = self.make_prelude().map(|p| (p, now_ms()));
             }
             #[cfg(feature = "diagnostics")]
             let notes = std::sync::Arc::<Mutex<Vec<Note>>>::default();
@@ -4264,7 +4440,7 @@ impl Host {
                 );
             }
             Ok(HostList {
-                allocator,
+                allocator: Mutex::new((allocator, now_ms())),
                 list,
                 deferred: Mutex::default(),
                 scratch: Mutex::default(),
@@ -5769,6 +5945,10 @@ impl Host {
         }
         let behind = late && flying();
         stage.next("submit: gathering what to ask about");
+        // The helpers awake from here to the end (`LEONIDA_PASSES_HOT`,
+        // `crate::shadow::passes_hot_us`): this submission's passes find
+        // them so, the waking overlapping the asking below.
+        let _hot = crate::shadow::hot();
         let this_submission = STARTED.fetch_add(1, Ordering::AcqRel) + 1;
         // The ranges shaders write are counted for it (with the relay).
         crate::shadow::preparing(this_submission);
@@ -5914,7 +6094,7 @@ impl Host {
         if late {
             *submitted += 1;
             #[cfg(feature = "diagnostics")]
-            if let Some([front, behind]) = self.span_lists() {
+            if let Some([front, behind]) = self.span_lists(*submitted) {
                 lists.insert(0, Some(front));
                 lists.push(Some(behind));
                 firsts.iter_mut().for_each(|first| *first += 1);
@@ -6579,6 +6759,25 @@ impl HostList {
         false
     }
 
+    /// Its prelude to [`PRELUDES`] (or gone, past [`PRELUDES_KEPT`]). Only
+    /// after the list's last submission finished.
+    pub(crate) fn give_prelude(&self) {
+        if !prelude_pool() {
+            return;
+        }
+        let Some(prelude) = self.prelude.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+            return;
+        };
+        let mut kept = PRELUDES.lock().unwrap_or_else(|e| e.into_inner());
+        if kept.len() < PRELUDES_KEPT {
+            kept.push(prelude);
+        } else {
+            drop(kept);
+            drop(prelude);
+            PRELUDES_ALIVE.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
     /// Only after the list's last submission finished (every one is waited
     /// for).
     pub(crate) fn reset(&self) {
@@ -6611,16 +6810,23 @@ impl HostList {
                 give_chunks(std::mem::take(&mut scratch.chunks));
             }
         }
+        // Nor runs its prelude: the next submission to need one takes it.
+        self.give_prelude();
         // Open and empty since it was made or last reset: the allocator holds
         // nothing, the list nothing recorded (`HostList::leave_open`).
         if left_open {
             FRESH_OPEN[1].fetch_add(1, Ordering::Relaxed);
         } else {
-            // SAFETY: the list is not executing.
+            // (`LEONIDA_ALLOCATOR_TRIM=1`: an old allocator is taken anew
+            // here, where it holds nothing that runs; memory stack by
+            // skornuta, skornuta/victory-memory-stack 57fb136, GPL-3.0.)
+            let mut allocator = self.allocator.lock().unwrap_or_else(|e| e.into_inner());
+            let (allocator, made) = &mut *allocator;
+            let fresh = allocator_refresh(allocator, made, &ALLOCATOR_TRIMS[0]);
+            // SAFETY: the list is not executing; a fresh allocator is new
+            // and empty.
             let reset = unsafe {
-                self.allocator
-                    .Reset()
-                    .and_then(|()| self.list.Reset(&self.allocator, None))
+                (if fresh { Ok(()) } else { allocator.Reset() }).and_then(|()| self.list.Reset(&*allocator, None))
             };
             if let Err(e) = reset {
                 fail(format_args!("a host command list did not reset ({e})"));
@@ -7059,17 +7265,23 @@ impl HostList {
         if barriers.is_empty() && syncs.is_empty() && uploads.is_empty() {
             return None;
         }
-        let Some((allocator, list)) = self
-            .prelude
-            .get_or_init(|| host().and_then(|h| h.make_prelude()))
-            .as_ref()
-        else {
+        let mut held = self.prelude.lock().unwrap_or_else(|e| e.into_inner());
+        if held.is_none() {
+            let kept = if prelude_pool() { PRELUDES.lock().unwrap_or_else(|e| e.into_inner()).pop() } else { None };
+            *held = kept.or_else(|| host().and_then(|h| h.make_prelude()).map(|p| (p, now_ms())));
+        }
+        let Some(((allocator, list), made)) = held.as_mut() else {
             fail(format_args!("no host list for a state prelude"));
         };
+        // (`LEONIDA_ALLOCATOR_TRIM=1`: an old allocator is taken anew here,
+        // before the prelude records again; memory stack by skornuta,
+        // skornuta/victory-memory-stack 57fb136, GPL-3.0.)
+        let fresh = allocator_refresh(allocator, made, &ALLOCATOR_TRIMS[1]);
+        let (allocator, list) = (&*allocator, &*list);
         // SAFETY: the prelude is not executing (every submission is waited
-        // for); the textures are live.
+        // for); the textures are live. A fresh allocator is new and empty.
         let recorded = unsafe {
-            allocator.Reset().and_then(|()| {
+            (if fresh { Ok(()) } else { allocator.Reset() }).and_then(|()| {
                 list.Reset(allocator, None)?;
                 if !aliasing.is_empty() {
                     list.ResourceBarrier(&aliasing);
@@ -7380,18 +7592,16 @@ impl HostList {
     /// The host address of the list's indirect-work budget, zeroed at each
     /// submission of the list from the first use after a reset on.
     pub(crate) fn budget(&self) -> Option<u64> {
-        let (buffer, data) = self
-            .budget
-            .get_or_init(|| {
-                let (b, d) = host()?.shared_buffer(256)?;
-                Some((b, d as usize))
-            })
-            .as_ref()?;
+        // (`LEONIDA_BUDGET_PACK=1`: a slot of a shared buffer; memory stack by skornuta,
+        // skornuta/victory-memory-stack 57fb136, GPL-3.0.)
+        let budget = self.budget.get_or_init(Budget::new).as_ref()?;
+        let (buffer, offset) = budget.place();
+        let data = budget.data();
         let card = self.card_budget.get_or_init(|| self.make_card_budget()).as_ref();
         let mut deferred = self.deferred();
         if !deferred.budget_zeroed {
             deferred.budget_zeroed = true;
-            let at = *data;
+            let at = data;
             // SAFETY: the list's own mapped words, written before it runs.
             // The words after the budget hold what the clamp noted about the
             // list's last run (mesh dispatches: the largest group count
@@ -7416,8 +7626,8 @@ impl HostList {
                 self.zero_card_budget(card);
             }
         }
-        // SAFETY: a live buffer.
-        Some(unsafe { card.unwrap_or(buffer).GetGPUVirtualAddress() })
+        // SAFETY: a live buffer; a packed budget lies `offset` into its own.
+        Some(unsafe { card.map_or_else(|| buffer.GetGPUVirtualAddress() + offset, |card| card.GetGPUVirtualAddress()) })
     }
 
     /// The budget's words in the card's own memory ([`card_budget`]), if
@@ -7469,11 +7679,12 @@ impl HostList {
         if !self.deferred().budget_zeroed {
             return;
         }
-        let (Some(Some(card)), Some(Some((mapped, _)))) =
+        let (Some(Some(card)), Some(Some(budget))) =
             (self.card_budget.get(), self.budget.get())
         else {
             return;
         };
+        let (mapped, offset) = budget.place();
         // SAFETY: an open list; both buffers are the list's own. The
         // mapped one is promoted from common to the copy destination.
         unsafe {
@@ -7482,7 +7693,7 @@ impl HostList {
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                 D3D12_RESOURCE_STATE_COPY_SOURCE,
             )]);
-            self.list.CopyBufferRegion(mapped, 4, card, 4, 16);
+            self.list.CopyBufferRegion(mapped, offset + 4, card, 4, 16);
             self.list.ResourceBarrier(&[transition(
                 card,
                 D3D12_RESOURCE_STATE_COPY_SOURCE,
@@ -8259,7 +8470,9 @@ enum Touch {
     Refresh(usize, usize, usize),
     /// The copy is given to shaders.
     Write(usize),
-    /// Title memory is written.
+    /// Title memory is written. The callers stop their walk there instead
+    /// (`refresh_ahead`); the tests of [`written_spans`] use it.
+    #[cfg_attr(not(test), allow(dead_code))]
     Title,
     Nothing,
     /// Another part of the submission begins.
@@ -9253,6 +9466,41 @@ struct Presenter {
     notice: panel::Notice,
     /// The F1 settings menu.
     menu: menu::Menu,
+    /// The swap chain lets a frame be shown at once ([`tearing`]): its flags, kept for
+    /// ResizeBuffers, which may not change them.
+    tearing: bool,
+    /// Presents ask for that; off for the rest of the run once one such present is refused.
+    presents_tearing: bool,
+    /// A refused present was logged.
+    present_refused: bool,
+}
+
+/// Whether the swap chain lets a frame be shown as soon as it is presented, not at the screen's
+/// next refresh (`DXGI_FEATURE_PRESENT_ALLOW_TEARING`; `LEONIDA_TEARING=0`: not). Without it a
+/// window in front, which Windows then shows without its compositor ("independent flip"), had
+/// each frame wait for a refresh with two buffers: frame times rounded up to whole refreshes,
+/// about 2 fps fewer than the same window behind another (2026-11-28). On a G-SYNC or FreeSync
+/// screen nothing tears; on others a frame may.
+fn tearing(factory: &IDXGIFactory2) -> bool {
+    if std::env::var("LEONIDA_TEARING").is_ok_and(|v| v.trim() == "0") {
+        return false;
+    }
+    let Ok(factory) = factory.cast::<IDXGIFactory5>() else { return false };
+    let mut allowed = windows::core::BOOL(0);
+    // SAFETY: a BOOL-sized answer for this feature.
+    let asked = unsafe {
+        factory.CheckFeatureSupport(
+            DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+            (&raw mut allowed).cast(),
+            size_of_val(&allowed) as u32,
+        )
+    };
+    asked.is_ok() && allowed.as_bool()
+}
+
+/// The swap chain's flags for [`tearing`].
+fn chain_flags(tearing: bool) -> DXGI_SWAP_CHAIN_FLAG {
+    if tearing { DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING } else { DXGI_SWAP_CHAIN_FLAG(0) }
 }
 
 /// The frame rate, shown in the window's caption every second and logged
@@ -9261,6 +9509,31 @@ struct Presenter {
 /// line at the top of the picture (`menu.rs`).
 pub(crate) static METER_FPS_TENTHS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+/// Logs how even the frames since the last line were: the median, the 95th
+/// and 99th percentile and the longest interval between presents, and how
+/// many took over 50 and over 100 ms (a frame rate of 30 with every frame
+/// at 33 ms plays smoothly; one with frames of 20 and 80 ms stutters).
+fn frame_times_line(intervals: &mut Vec<f32>) {
+    if intervals.is_empty() {
+        return;
+    }
+    intervals.sort_unstable_by(f32::total_cmp);
+    let at = |q: f32| intervals[((intervals.len() - 1) as f32 * q).round() as usize];
+    let over = |ms: f32| intervals.iter().filter(|&&t| t > ms).count();
+    tracing::info!(
+        target: "leonida_gpu::frame_times",
+        "frame times: {} frames, median {:.1} ms, p95 {:.1}, p99 {:.1}, longest {:.1}; {} over 50 ms, {} over 100 ms",
+        intervals.len(),
+        at(0.5),
+        at(0.95),
+        at(0.99),
+        intervals[intervals.len() - 1],
+        over(50.0),
+        over(100.0)
+    );
+    intervals.clear();
+}
+
 struct Meter {
     since: std::time::Instant,
     frames: u32,
@@ -9268,6 +9541,10 @@ struct Meter {
     copy_stats_frames: u64,
     drawn: u64,
     logged: std::time::Instant,
+    /// The last present counted, and the intervals between presents since
+    /// the last frame-rate line, in ms: what the average hides (stutter).
+    last: std::time::Instant,
+    intervals: Vec<f32>,
     /// The caption the window had, once read.
     caption: Option<Vec<u16>>,
 }
@@ -9282,6 +9559,8 @@ impl Meter {
             copy_stats_frames: 0,
             drawn: crate::draw::drawn(),
             logged: now,
+            last: now,
+            intervals: Vec::with_capacity(512),
             caption: None,
         }
     }
@@ -9302,10 +9581,14 @@ impl Meter {
         {
             self.copy_stats_frames += 1;
         }
+        let now = std::time::Instant::now();
+        self.intervals.push((now - self.last).as_secs_f32() * 1000.0);
+        self.last = now;
         let elapsed = self.since.elapsed();
         if elapsed < std::time::Duration::from_secs(1) {
             return;
         }
+        frame_times_line(&mut self.intervals);
         let drawn = crate::draw::drawn();
         let frames = f64::from(self.frames);
         let fps = frames / elapsed.as_secs_f64();
@@ -9820,7 +10103,7 @@ impl Host {
             // SAFETY: no back buffer is held; every submission was waited for.
             let resized = unsafe {
                 p.swap_chain
-                    .ResizeBuffers(BUFFERS, width, height, format, DXGI_SWAP_CHAIN_FLAG(0))
+                    .ResizeBuffers(BUFFERS, width, height, format, chain_flags(p.tearing))
             };
             match resized {
                 Ok(()) => {
@@ -10058,7 +10341,17 @@ impl Host {
                 },
             );
             let called = crate::streamline::present_called(&presenting);
-            let _ = p.swap_chain.Present(0, DXGI_PRESENT(0));
+            let shown = p.swap_chain.Present(0, if p.presents_tearing { DXGI_PRESENT_ALLOW_TEARING } else { DXGI_PRESENT(0) });
+            if shown.is_err() && p.presents_tearing {
+                // A white window on an RTX 5070 at 1440p (2026-11-28): presents that may tear
+                // were not shown. The rest of the run presents at the next refresh.
+                tracing::warn!(code = %shown, frame, "a present shown at once was refused; presenting at the next refresh for the rest of the run");
+                p.presents_tearing = false;
+                let _ = p.swap_chain.Present(0, DXGI_PRESENT(0));
+            } else if shown.is_err() && !p.present_refused {
+                p.present_refused = true;
+                tracing::warn!(code = %shown, frame, "a present was refused (logged once)");
+            }
             crate::streamline::present_returned(called);
             crate::streamline::present_ends(presenting);
             showing.next("the frame meter");
@@ -10095,6 +10388,8 @@ impl Host {
         // SAFETY: plain object creation for our window.
         unsafe {
             let factory: IDXGIFactory2 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0))?;
+            let tearing = tearing(&factory);
+            tracing::info!(tearing, "swap chain: frames shown as soon as presented (LEONIDA_TEARING=0: at the next refresh)");
             let desc = DXGI_SWAP_CHAIN_DESC1 {
                 Width: width,
                 Height: height,
@@ -10106,6 +10401,7 @@ impl Host {
                 BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
                 BufferCount: BUFFERS,
                 SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+                Flags: chain_flags(tearing).0 as u32,
                 ..Default::default()
             };
             // FSR 3 frame generation (where DLSS Frame Generation does not
@@ -10156,13 +10452,44 @@ impl Host {
                 panel: panel::Panel::new(),
                 notice: panel::Notice::new(),
                 menu: menu::Menu::new(),
+                tearing,
+                presents_tearing: tearing,
+                present_refused: false,
             })
         }
     }
 }
 
+/// The property our hook of the title's window procedure puts on the
+/// windows the title makes (`TITLE_PROC` in `leonida_hle::modules::lifecycle`).
+const TITLE_HOOK: PCWSTR = w!("leonida.wndproc");
+
+/// A visible top-level window of this process, as [`title_window`] finds it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Candidate {
+    hwnd: usize,
+    /// Carries [`TITLE_HOOK`]: a window the title made.
+    hooked: bool,
+    /// Its client area is not empty.
+    sized: bool,
+}
+
+/// Which of `candidates` (in z-order, topmost first) is the title's: the
+/// one our hook marked, else the first with a client area. Pure, for testing.
+fn pick_title_window(candidates: &[Candidate]) -> Option<usize> {
+    candidates
+        .iter()
+        .find(|c| c.hooked)
+        .or_else(|| candidates.iter().find(|c| c.sized))
+        .map(|c| c.hwnd)
+}
+
 /// A visible top-level window of this process: the one the title made, if
-/// it made one.
+/// it made one. Not simply the first visible one: started under a
+/// pseudoconsole (from Windows Terminal, or by a process that has one), this
+/// process also owns a visible `PseudoConsoleWindow` of 0x0 pixels. When
+/// that one was above the title's window in z-order, the swap chain was made
+/// for it, and the title's window stayed white with no frame ever shown.
 fn title_window() -> Option<HWND> {
     extern "system" fn visit(hwnd: HWND, found: LPARAM) -> windows::core::BOOL {
         let mut process = 0;
@@ -10172,16 +10499,59 @@ fn title_window() -> Option<HWND> {
             if process == windows::Win32::System::Threading::GetCurrentProcessId()
                 && IsWindowVisible(hwnd).as_bool()
             {
-                *(found.0 as *mut Option<HWND>) = Some(hwnd);
-                return false.into();
+                let mut area = RECT::default();
+                let sized = GetClientRect(hwnd, &mut area).is_ok() && area.right > area.left && area.bottom > area.top;
+                let hooked = !GetPropW(hwnd, TITLE_HOOK).0.is_null();
+                (*(found.0 as *mut Vec<Candidate>)).push(Candidate { hwnd: hwnd.0 as usize, hooked, sized });
             }
         }
         true.into()
     }
-    let mut found: Option<HWND> = None;
-    // SAFETY: the callback only writes `found`, which outlives the call.
+    let mut found: Vec<Candidate> = Vec::new();
+    // SAFETY: the callback only adds to `found`, which outlives the call.
     let _ = unsafe { EnumWindows(Some(visit), LPARAM(&raw mut found as isize)) };
-    found
+    let picked = pick_title_window(&found);
+    if !found.iter().any(|c| c.hooked) {
+        tracing::info!(
+            windows = found.len(),
+            "no window of the title's among ours: presenting to the first with a client area, if any"
+        );
+    }
+    picked.map(|hwnd| HWND(hwnd as *mut _))
+}
+
+#[cfg(test)]
+mod title_window_tests {
+    use super::{Candidate, pick_title_window};
+
+    fn window(hwnd: usize, hooked: bool, sized: bool) -> Candidate {
+        Candidate { hwnd, hooked, sized }
+    }
+
+    /// A pseudoconsole's 0x0 window above the title's in z-order.
+    #[test]
+    fn the_titles_window_wins_over_a_pseudo_console_above_it() {
+        let found = [window(1, false, false), window(2, true, true)];
+        assert_eq!(pick_title_window(&found), Some(2));
+    }
+
+    #[test]
+    fn the_titles_window_counts_even_while_its_client_area_is_empty() {
+        let found = [window(1, false, true), window(2, true, false)];
+        assert_eq!(pick_title_window(&found), Some(2));
+    }
+
+    #[test]
+    fn without_one_of_the_titles_the_first_with_a_client_area() {
+        let found = [window(1, false, false), window(2, false, true), window(3, false, true)];
+        assert_eq!(pick_title_window(&found), Some(2));
+    }
+
+    #[test]
+    fn a_pseudo_console_alone_is_no_window_to_present_to() {
+        assert_eq!(pick_title_window(&[window(1, false, false)]), None);
+        assert_eq!(pick_title_window(&[]), None);
+    }
 }
 
 /// `state` without the bits the host texture's flags forbid: the console
@@ -10246,7 +10616,9 @@ impl Host {
             );
             self.log_video_memory("right after that change");
         }
-        Some([own.Budget, own.CurrentUsage, shared.Budget, shared.CurrentUsage])
+        // (`LEONIDA_VRAM_BUDGET_MB`: no more than that is taken as the budget)
+        let budget = vram_budget_cap().map_or(own.Budget, |cap| own.Budget.min(cap));
+        Some([budget, own.CurrentUsage, shared.Budget, shared.CurrentUsage])
     }
 
     /// Both of the system's memory groups for this process, in bytes: for
@@ -10296,6 +10668,17 @@ impl Host {
     /// memory that shaders write, which upload memory cannot be. Starts in
     /// the common state (buffers move out of it implicitly).
     pub(crate) fn shared_buffer(&self, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
+        // (one made ahead, if it is of that size and one is in store: `crate::ahead`)
+        if size == crate::ahead::SIZE
+            && let Some(made) = crate::ahead::shared()
+        {
+            return Some(made);
+        }
+        self.shared_buffer_now(size)
+    }
+
+    /// [`Host::shared_buffer`], made now.
+    pub(crate) fn shared_buffer_now(&self, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
         MADE[2].fetch_add(1, Ordering::Relaxed);
         MADE[3].fetch_add(size, Ordering::Relaxed);
         let heap = D3D12_HEAP_PROPERTIES {
@@ -10606,6 +10989,57 @@ pub(crate) fn transition(
     }
 }
 
+/// Every translated shader indexes the descriptor heaps directly (Shader
+/// Model 6.6). Windows 10's own Direct3D 12 refuses those root signature
+/// flags ("Unsupported bit-flag set (root signature flags c00)"): no pipeline
+/// could be made, and the title failed a few seconds later with nothing said
+/// of why (RTX 2080 Ti and RTX 2070 reports, Windows 10, 2026-11-27). Said
+/// plainly here, and the process ends.
+fn require_direct_heaps(device: &ID3D12Device) {
+    let mut model = D3D12_FEATURE_DATA_SHADER_MODEL { HighestShaderModel: D3D_SHADER_MODEL_6_6 };
+    // SAFETY: the feature query writes the structure of the given size.
+    let asked = unsafe {
+        device.CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, (&raw mut model).cast(), size_of_val(&model) as u32)
+    };
+    let model_ok = asked.is_ok() && model.HighestShaderModel.0 >= D3D_SHADER_MODEL_6_6.0;
+    let root_ok = root_with_direct_heaps(device);
+    if model_ok && root_ok {
+        return;
+    }
+    let text = format!(
+        "Error: this PC's Direct3D 12 cannot run the translated shaders: they need Shader Model 6.6 with directly indexed descriptor heaps (highest shader model here {:#x}; such a root signature was {}). Windows 10's built-in Direct3D 12 does not have it, Windows 11 does; a current graphics driver is needed too.",
+        model.HighestShaderModel.0,
+        if root_ok { "made" } else { "refused" }
+    );
+    tracing::error!("{text}");
+    println!("{text}");
+    std::process::exit(3);
+}
+
+fn root_with_direct_heaps(device: &ID3D12Device) -> bool {
+    let desc = D3D12_VERSIONED_ROOT_SIGNATURE_DESC {
+        Version: D3D_ROOT_SIGNATURE_VERSION_1_1,
+        Anonymous: D3D12_VERSIONED_ROOT_SIGNATURE_DESC_0 {
+            Desc_1_1: D3D12_ROOT_SIGNATURE_DESC1 {
+                Flags: D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED
+                    | D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED,
+                ..Default::default()
+            },
+        },
+    };
+    // SAFETY: the description lives through the calls; the blob is read in
+    // full before it is released.
+    unsafe {
+        let mut blob: Option<windows::Win32::Graphics::Direct3D::ID3DBlob> = None;
+        if D3D12SerializeVersionedRootSignature(&desc, &mut blob, None).is_err() {
+            return false;
+        }
+        let Some(blob) = blob else { return false };
+        let bytes = std::slice::from_raw_parts(blob.GetBufferPointer().cast::<u8>(), blob.GetBufferSize());
+        device.CreateRootSignature::<ID3D12RootSignature>(0, bytes).is_ok()
+    }
+}
+
 /// A window of the given client size, owned by its own message thread.
 fn window(width: u32, height: u32) -> windows::core::Result<HWND> {
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -10727,6 +11161,28 @@ mod spare {
         assert_eq!(spare.take(1), Some(2));
         assert_eq!(spare.bytes, 0);
         assert!(spare.kept.is_empty());
+    }
+
+    /// A trim frees only what stayed kept through the whole window since the
+    /// last one (memory stack by skornuta, skornuta/victory-memory-stack
+    /// 57fb136, GPL-3.0).
+    #[test]
+    fn a_trim_frees_only_what_was_never_asked_for_since_the_last() {
+        let mut spare: Spare<u32> = Spare::new();
+        for (thing, size) in [(1, 4), (2, 4), (3, 4)] {
+            assert_eq!(spare.give(thing, size, 100), None);
+        }
+        // The first trim knows no window yet: nothing goes.
+        assert!(spare.trim().is_empty());
+        assert_eq!(spare.bytes, 12);
+        // One taken and given back: 8 bytes stayed kept all the while.
+        assert_eq!(spare.take(4), Some(3));
+        assert_eq!(spare.give(3, 4, 100), None);
+        let gone = spare.trim();
+        assert_eq!(gone.iter().map(|g| g.1).sum::<u64>(), 8);
+        assert_eq!(gone.iter().map(|g| g.0).collect::<Vec<_>>(), vec![1, 2], "the oldest go");
+        assert_eq!(spare.bytes, 4);
+        assert_eq!(spare.take(4), Some(3));
     }
 }
 
