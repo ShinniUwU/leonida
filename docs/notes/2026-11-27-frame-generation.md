@@ -375,11 +375,11 @@ the title ends, whichever comes first.
 The menu is drawn in Leonida's look: a dark panel, paper text, flamingo for the frame and the
 selected row, neon for the selected tab, teal for ON, amber for notes, and upper-case labels in
 a 5 by 7 dot font of our own. There are four tabs: DISPLAY, FRAME GENERATION (with the type that
-runs, shown but not changed), PICTURE (the DLSS model and sharpness) and CONTROLS. Each row shows its value,
-and the bottom line is the selected switch's help. The last row says that more settings, which
-need a restart, are in the launcher. `Q` / `E` or a click changes tab. Up / Down or `W` / `S`
-move. Left / Right or `A` / `D` change the value (stopping at the ends). `Enter` or a click
-moves it on (round to the first). `Esc` or `F1` closes.
+runs, shown but not changed), PICTURE (the DLSS model and sharpness) and CONTROLS. Each row
+shows its value, and the bottom line is the selected switch's help. The last row says that more
+settings, which need a restart, are in the launcher. `Q` / `E` or a click changes tab. Up / Down
+or `W` / `S` move. Left / Right or `A` / `D` change the value (stopping at the ends). `Enter`
+or a click moves it on (round to the first). `Esc` or `F1` closes.
 
 Keys and clicks come from the input poll in `leonida-hle` (every 8 ms). While the menu is open
 the game gets no keys and no mouse. The mouse capture lets the cursor go, and the game's mouse
