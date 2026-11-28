@@ -540,6 +540,14 @@ static FAILED: AtomicU64 = AtomicU64::new(0);
 const TRIES: u64 = 3;
 
 fn save(due: impl FnOnce(Instant) -> bool) -> Option<Result<PathBuf>> {
+    save_with(due, crate::settings::save_changes)
+}
+
+/// [`save`], writing through `write` (the settings file's [`crate::settings::save_changes`]).
+fn save_with(
+    due: impl FnOnce(Instant) -> bool,
+    write: impl FnOnce(&BTreeMap<String, String>) -> Result<PathBuf>,
+) -> Option<Result<PathBuf>> {
     let _saving = SAVING.lock().unwrap_or_else(|e| e.into_inner());
     // Taken out under the lock and written without it: the menu reads and
     // changes values while the file is written.
@@ -551,7 +559,7 @@ fn save(due: impl FnOnce(Instant) -> bool) -> Option<Result<PathBuf>> {
         chosen.unsaved_since = None;
         chosen.values.clone()
     };
-    let saved = crate::settings::save_changes(&values);
+    let saved = write(&values);
     if saved.is_ok() {
         FAILED.store(0, Ordering::Relaxed);
     } else if FAILED.fetch_add(1, Ordering::Relaxed) + 1 < TRIES {
@@ -692,6 +700,33 @@ mod tests {
         let mfg = find("LEONIDA_MFG_UNLOCKER").unwrap();
         assert_eq!((mfg.default, mfg.group), ("0", Group::FrameGeneration));
         assert!(mfg.help.contains("NVIDIA does not support it"));
+    }
+
+    #[test]
+    fn a_menu_change_is_saved_and_resolved_at_the_next_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings").join("switches.json");
+        let write = |values: &BTreeMap<String, String>| {
+            crate::settings::save_changes_to(&path, values).map(|()| path.clone())
+        };
+        // What the F1 menu does for a row: `set`, then a save once changes
+        // are quiet (or the menu closes).
+        assert!(set("LEONIDA_FRAME_INTERVAL_US", "16667"));
+        let saved = save_with(|_| true, write).expect("a change to save");
+        assert_eq!(saved.unwrap(), path);
+        // The next start: the file is read and resolved over the profiles.
+        let loaded = crate::settings::load_from(&path);
+        assert!(loaded.notes.is_empty(), "{:?}", loaded.notes);
+        let plan = crate::graphics::resolve_with_saved(
+            &crate::graphics::GraphicsSettings::default(),
+            None,
+            &crate::graphics::Environment::new(),
+            &loaded.switches,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.settings["LEONIDA_FRAME_INTERVAL_US"], "16667");
+        assert_eq!(plan.sources["LEONIDA_FRAME_INTERVAL_US"], "settings");
     }
 
     #[test]
