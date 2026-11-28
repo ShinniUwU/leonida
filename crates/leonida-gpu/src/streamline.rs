@@ -481,7 +481,7 @@ struct Facts {
 /// has DLSS when it was only turned off or its files were not found.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum NoDlss {
-    /// Not asked (F1 > DLSS > OFF, or LEONIDA_DLSS unset).
+    /// Not asked (DLSS OFF in the launcher, or LEONIDA_DLSS unset).
     TurnedOff,
     /// Asked, but Streamline's files did not load.
     FilesMissing,
@@ -533,7 +533,7 @@ fn notice_of(f: &Facts, dlss_live: bool, fsr_live: bool) -> Vec<String> {
         // An RTX 20 or 30 with DLSS Frame Generation: a mod beside leonida.exe (MFG Unlocker,
         // as winmm.dll) answers for the card; how many frames it gives, Streamline says.
         lines.push("FRAME GEN: DLSS, UNLOCKED BY A MOD (F1 MENU: 2X-6X)".into());
-        lines.push("NVIDIA DOES NOT SUPPORT IT: IF IT FAILS, REMOVE IT".into());
+        lines.push("NVIDIA DOES NOT SUPPORT IT: IF IT FAILS, TURN IT OFF".into());
     } else if dlss_live {
         lines.push("FRAME GEN: DLSS, SUPPORTED HERE (F1 MENU: 2X-6X)".into());
         lines.push("MORE THAN 2X NEEDS AN RTX 50 CARD".into());
@@ -541,7 +541,7 @@ fn notice_of(f: &Facts, dlss_live: bool, fsr_live: bool) -> Vec<String> {
         lines.push(if no_dlss_fg {
             "USING AMD FSR 3 FRAME GEN INSTEAD: 2X AT MOST".into()
         } else {
-            "FRAME GEN: AMD FSR 3 (CHOSEN IN F1), 2X AT MOST".into()
+            "FRAME GEN: AMD FSR 3 (AS ASKED), 2X AT MOST".into()
         });
         lines.push("FSR 3 FRAME GEN NEEDS DLSS UPSCALING (ON)".into());
     } else if f.fsr_needs_dlss {
@@ -549,13 +549,13 @@ fn notice_of(f: &Facts, dlss_live: bool, fsr_live: bool) -> Vec<String> {
         lines.push(match f.no_dlss {
             Some(NoDlss::FilesMissing) => "NVIDIA DLSS FILES NOT FOUND (LEONIDA_STREAMLINE_DIR)",
             Some(NoDlss::Card) => "THIS CARD HAS NO DLSS UPSCALING",
-            _ => "DLSS UPSCALING IS OFF: TURN IT ON IN F1 > DLSS",
+            _ => "DLSS UPSCALING IS OFF: TURN IT ON IN THE LAUNCHER",
         }.into());
     } else if f.fsr_asked && !f.fsr_loaded {
         lines.push("FRAME GEN OFF: AMD FSR 3 FILES NOT FOUND".into());
         lines.push("(AMD FIDELITYFX DLLS, LEONIDA_FIDELITYFX_DIR)".into());
     } else if no_dlss_fg {
-        lines.push("F1 > FRAME GEN TYPE > FSR 3 GIVES 2X ON THIS CARD".into());
+        lines.push("FSR 3 FRAME GEN (IN THE LAUNCHER) GIVES 2X HERE".into());
     } else if f.dlss_fg_supported {
         lines.push("FRAME GEN: DLSS DID NOT START (SEE THE LOG)".into());
     } else {

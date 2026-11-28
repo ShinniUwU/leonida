@@ -900,6 +900,8 @@ mod tests {
         let shown = |lines: &[String]| {
             for l in lines {
                 assert!(l.len() <= 52, "{l}");
+                // The F1 menu has the amount only; DLSS and the type are set in the launcher.
+                assert!(!l.contains("F1 >") && !l.contains("IN F1"), "{l}");
                 assert!(l.bytes().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || b" .,:()/->+!?_=*".contains(&c)), "{l}");
             }
         };
