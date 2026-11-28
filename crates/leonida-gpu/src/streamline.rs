@@ -1921,12 +1921,6 @@ fn framegen_wanted() -> u32 {
     }
 }
 
-/// Whether frame generation can be switched and changed while the title runs: it was planned
-/// at the start, so our swap chain is Streamline's proxy (the F1 menu asks).
-pub(crate) fn framegen_live() -> bool {
-    FG_READY.load(Acquire) && SWAP_CHAIN_PROXIED.load(Acquire) || fsr::live_swap_chain()
-}
-
 /// Which frame generation the presents have: DLSS's, AMD's FSR 3, or none.
 pub(crate) fn framegen_kind() -> Option<&'static str> {
     if FG_READY.load(Acquire) && SWAP_CHAIN_PROXIED.load(Acquire) {

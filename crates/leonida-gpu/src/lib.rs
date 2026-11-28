@@ -23,6 +23,8 @@ mod ambient;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod capture;
 #[cfg(windows)]
+mod canvas;
+#[cfg(windows)]
 mod compose;
 pub mod console;
 #[cfg(all(windows, feature = "diagnostics"))]
@@ -41,6 +43,8 @@ mod external;
 pub mod fence;
 pub mod frame;
 #[cfg(windows)]
+mod fpsbox;
+#[cfg(windows)]
 mod framelog;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod book;
@@ -48,9 +52,10 @@ mod book;
 mod heap_marks;
 #[cfg(windows)]
 mod host;
-/// The F1 settings menu is shown (`host/menu.rs`): the title gets no keyboard meanwhile
+/// The F1 settings menu is shown (`menu`): the title gets no mouse meanwhile
 /// (read by the input module).
-pub static SETTINGS_MENU_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static SETTINGS_MENU_OPEN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 #[cfg(windows)]
 mod indirect;
 #[cfg(windows)]
@@ -60,7 +65,13 @@ mod port;
 #[cfg(windows)]
 mod land;
 pub mod list;
+#[cfg(windows)]
+pub mod menu;
 pub mod object;
+#[cfg(windows)]
+mod overlay;
+#[cfg(windows)]
+mod panel;
 pub mod pipeline;
 #[cfg(windows)]
 mod picked;

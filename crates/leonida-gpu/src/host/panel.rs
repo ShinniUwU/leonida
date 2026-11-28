@@ -1,66 +1,27 @@
-//! The run's numbers on the picture, in every build (`LEONIDA_PANEL=1`; off
-//! by default; F3 or the settings menu shows and hides it while our window
-//! has the focus; the time spent recording is counted in diagnostics builds
-//! only): white
-//! text on a black box in the upper left corner of what is shown, so that a
-//! screenshot carries them, with what it costs itself on the submitting
-//! thread. Made again twice a second from the counters of
-//! the frame-rate line, memory and textures; a frame itself only copies the
-//! box out of a buffer in the card's memory. Copied onto the swap chain's
-//! buffer, behind the title's picture: saved frames and the frame recorder
-//! see the title's own.
+//! What this card does for frame generation, said at the top of the picture
+//! for the first seconds of a run (`crate::streamline::notice`), in every
+//! build: white text on a black box, copied onto the swap chain's buffer
+//! behind the title's picture, so saved frames and the frame recorder see the
+//! title's own. From VIctory-NVIDIA's numbers panel; the F3 panel itself is
+//! `crate::panel` now.
 
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_F3};
-use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
 use super::font::{colours, glyph};
 use super::{Host, HostList, transition};
 
-/// How often the numbers change.
-const EVERY: Duration = Duration::from_millis(500);
-
 /// A character's dots, and with the space beside and below it.
 const GLYPH: (u32, u32) = (5, 7);
 const CELL: (u32, u32) = (6, 9);
-/// Characters in a line, lines, and the box's rim in dots.
-const COLUMNS: u32 = 40;
-const LINES: u32 = 10;
+/// The box's rim in dots.
 const RIM: u32 = 3;
 
 /// The texts are put into one of these in turn: the card reads the others,
 /// at most half a second old.
 const UPLOADS: usize = 4;
-
-fn asked() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| crate::switch::on("LEONIDA_PANEL"))
-}
-
-/// Whether it is shown now.
-pub(super) fn shown() -> &'static AtomicBool {
-    static SHOWN: OnceLock<AtomicBool> = OnceLock::new();
-    SHOWN.get_or_init(|| AtomicBool::new(asked()))
-}
-
-/// F3 was pressed since the last call, with one of our windows in front.
-fn pressed() -> bool {
-    static DOWN: AtomicBool = AtomicBool::new(false);
-    // SAFETY: a plain query.
-    let down = unsafe { GetAsyncKeyState(i32::from(VK_F3)) } < 0;
-    if DOWN.swap(down, Ordering::Relaxed) || !down {
-        return false;
-    }
-    let mut process = 0;
-    // SAFETY: plain queries; room for the answer.
-    unsafe { GetWindowThreadProcessId(GetForegroundWindow(), &mut process) };
-    process == std::process::id()
-}
 
 /// A box's characters in a line, and lines.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -68,9 +29,6 @@ pub(super) struct Shape {
     columns: u32,
     lines: u32,
 }
-
-/// The numbers panel's box.
-const PANEL: Shape = Shape { columns: COLUMNS, lines: LINES };
 
 /// The box's size in pixels, a dot being `scale` of them each way.
 const fn size(shape: Shape, scale: u32) -> (u32, u32) {
@@ -116,95 +74,6 @@ fn painted(lines: &[String], shape: Shape, scale: u32, colours: [&[u8]; 2], pitc
         }
     }
     out
-}
-
-/// The counters read for it. They grow, and go back to 0 with the frame-rate
-/// line (right behind a look of ours).
-#[derive(Clone, Copy, Default)]
-struct Counters([u64; COUNTERS]);
-
-const COUNTERS: usize = 11;
-
-impl Counters {
-    fn now() -> Counters {
-        use super::{CARD_CLOCK_US, COPY_BACK, PREPARING};
-        #[cfg(feature = "diagnostics")]
-        let recording = crate::copystat::peek(crate::copystat::C::RecordNs);
-        #[cfg(not(feature = "diagnostics"))]
-        let recording = 0;
-        let get = |a: &std::sync::atomic::AtomicU64| a.load(Ordering::Relaxed);
-        Counters([
-            super::worked(),
-            get(&CARD_CLOCK_US[0]),
-            get(&CARD_CLOCK_US[1]),
-            get(&CARD_CLOCK_US[2]),
-            get(&PREPARING[3]),
-            get(&COPY_BACK[0]),
-            get(&COPY_BACK[1]),
-            get(&crate::shadow::CARD_STATS[0]),
-            crate::draw::dropped_now(),
-            recording,
-            crate::draw::drawn(),
-        ])
-    }
-
-    /// What came since `before`, per frame.
-    fn since(self, before: Counters, frames: f64) -> [f64; COUNTERS] {
-        let mut out = [0.0; COUNTERS];
-        for (i, out) in out.iter_mut().enumerate() {
-            let (was, is) = (before.0[i], self.0[i]);
-            *out = if is >= was { is - was } else { is } as f64 / frames;
-        }
-        out
-    }
-}
-
-/// The process's memory in bytes: in physical memory, and committed
-/// (private bytes).
-fn process_memory() -> (u64, u64) {
-    use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
-    use windows_sys::Win32::System::Threading::GetCurrentProcess;
-    let mut c = PROCESS_MEMORY_COUNTERS {
-        cb: size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
-        ..Default::default()
-    };
-    // SAFETY: our own process and a sized structure.
-    unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) };
-    (c.WorkingSetSize as u64, c.PagefileUsage as u64)
-}
-
-/// The frame generation line: `per` frames shown for each one rendered.
-fn generated(fps: f64, per: u32) -> String {
-    match per {
-        0 | 1 => "FRAME GEN OFF".to_owned(),
-        per => format!("FRAME GEN {per}X  SHOWN {:.1} FPS", fps * f64::from(per)),
-    }
-}
-
-/// The text. `c`: [`Counters`] per frame, `ms` a frame's time, `worst` the
-/// longest frame's, `cost` what this takes of a frame, in microseconds.
-fn text(c: &[f64; COUNTERS], ms: f64, worst: f64, cost: f64, host: &Host) -> Vec<String> {
-    let gb = |bytes: u64| bytes as f64 / (1u64 << 30) as f64;
-    let (working, private) = process_memory();
-    let [budget, used, _, shared] = host.video_memory().unwrap_or_default();
-    let idle = (c[1] / 1e3).min(ms);
-    let fps = 1e3 / ms.max(0.001);
-    vec![
-        format!("FPS {fps:.1}  FRAME {ms:.1} MS  LONGEST {worst:.0}"),
-        generated(fps, crate::streamline::shown_per_frame()),
-        format!("DRAWS {:.0}  DROPPED {:.0}", c[10], c[8]),
-        format!("SUBMIT BUSY {:.1}  WAITS FOR GPU {:.1}", c[0] / 1e3, c[3] / 1e3),
-        format!("GPU BUSY {:.1}  IDLE BEHIND US {:.1}", ms - idle, c[2] / 1e3),
-        if cfg!(feature = "diagnostics") {
-            format!("RECORDING {:.0} MS  COPY BACK {:.1}", c[9] / 1e6, c[5] / 1e3)
-        } else {
-            format!("COPY BACK {:.1} MS", c[5] / 1e3)
-        },
-        format!("MB UP {:.0}  TEXTURES {:.0}  BACK {:.0}", c[7] / 1e6, c[4] / 1e6, c[6] / 1e6),
-        format!("RAM {:.1} GB  IN MEMORY {:.1}", gb(private), gb(working)),
-        format!("VRAM {:.1}/{:.1} GB  SHARED {:.1}", gb(used), gb(budget), gb(shared)),
-        format!("THIS PANEL {:.0} US A FRAME", cost),
-    ]
 }
 
 /// The buffers of a box that size and format.
@@ -303,107 +172,6 @@ impl Buffers {
     }
 }
 
-/// The panel of a presenter.
-pub(super) struct Panel {
-    since: Instant,
-    frames: u32,
-    last: Instant,
-    worst: f64,
-    /// What this took since the last text.
-    cost: Duration,
-    before: Counters,
-    lines: Vec<String>,
-    changed: bool,
-    buffers: Option<Buffers>,
-    failed: bool,
-}
-
-impl Panel {
-    pub(super) fn new() -> Panel {
-        let now = Instant::now();
-        Panel {
-            since: now,
-            frames: 0,
-            last: now,
-            worst: 0.0,
-            cost: Duration::ZERO,
-            before: Counters::default(),
-            lines: Vec::new(),
-            changed: false,
-            buffers: None,
-            failed: false,
-        }
-    }
-
-    /// A frame was presented; `line`: the counters go back to 0 right behind
-    /// this call. (Not shown it asks for the key's state and no more.)
-    pub(super) fn frame(&mut self, line: bool) {
-        if pressed() {
-            shown().fetch_xor(true, Ordering::Relaxed);
-        }
-        if !shown().load(Ordering::Relaxed) {
-            self.frames = 0;
-            return;
-        }
-        let now = Instant::now();
-        if self.frames == 0 && now - self.last > 2 * EVERY {
-            // (Shown from here on.)
-            (self.since, self.last, self.worst, self.before) = (now, now, 0.0, Counters::now());
-            self.frames = 0;
-        }
-        self.frames += 1;
-        self.worst = self.worst.max((now - self.last).as_secs_f64() * 1e3);
-        self.last = now;
-        let elapsed = now - self.since;
-        if elapsed < EVERY && !(line && elapsed * 2 >= EVERY) {
-            return;
-        }
-        let Some(host) = super::host() else { return };
-        let frames = f64::from(self.frames);
-        let counters = Counters::now();
-        let c = counters.since(self.before, frames);
-        self.before = counters;
-        let cost = self.cost.as_secs_f64() * 1e6 / frames;
-        self.lines = text(&c, elapsed.as_secs_f64() * 1e3 / frames, self.worst, cost, host);
-        self.changed = true;
-        (self.since, self.frames, self.worst) = (now, 0, 0.0);
-        self.cost = now.elapsed();
-    }
-
-    /// Records the copy of the box onto `back`, a buffer of the swap chain of
-    /// that size and format in the state to be copied into.
-    pub(super) fn draw(
-        &mut self,
-        host: &Host,
-        list: &HostList,
-        back: &ID3D12Resource,
-        (width, height): (u32, u32),
-        format: DXGI_FORMAT,
-    ) {
-        if !shown().load(Ordering::Relaxed) || self.lines.is_empty() || self.failed {
-            return;
-        }
-        let began = Instant::now();
-        // Not the title's: the frame recorder leaves it out.
-        #[cfg(feature = "diagnostics")]
-        let _ours = crate::replay::record::unrecorded();
-        let scale = scale(height);
-        if self.buffers.as_ref().is_none_or(|b| (b.format, b.scale) != (format, scale)) {
-            // (What the card may still read stays: a picture's size changes once or twice in a run.)
-            std::mem::forget(self.buffers.take());
-            self.buffers = Buffers::new(host, PANEL, format, scale);
-            self.failed = self.buffers.is_none();
-            self.changed = true;
-        }
-        let Some(buffers) = &mut self.buffers else { return };
-        if std::mem::take(&mut self.changed) {
-            buffers.write(&self.lines);
-        }
-        buffers.copy(&list.list, back, (0, 0), (width, height));
-        self.cost += began.elapsed();
-    }
-}
-
 /// How long the start's notice stays.
 const NOTICE_FOR: Duration = Duration::from_secs(30);
 /// The longest notice line, in characters.
@@ -423,16 +191,14 @@ pub(super) struct Notice {
 
 impl Notice {
     pub(super) fn new() -> Notice {
-        // The first start of a new leonida.exe says first that it restarts by itself (menu.rs).
-        let warmup = super::menu::warmup_seconds().map(super::menu::warmup_notice).unwrap_or_default();
         let lines: Vec<String> =
-            warmup.into_iter().chain(crate::streamline::notice()).map(|l| l.to_ascii_uppercase()).collect();
+            crate::streamline::notice().into_iter().map(|l| l.to_ascii_uppercase()).collect();
         let columns = lines.iter().map(|l| l.len() as u32).max().unwrap_or(0).min(NOTICE_COLUMNS);
         let shape = Shape { columns, lines: lines.len() as u32 };
         Notice { done: lines.is_empty(), lines, shape, since: None, buffers: None, written: false }
     }
 
-    /// Records the copy of the notice onto `back` (as [`Panel::draw`]), at
+    /// Records the copy of the notice onto `back` (behind the picture), at
     /// the top in the middle, while it is due.
     pub(super) fn draw(&mut self, host: &Host, list: &HostList, back: &ID3D12Resource, (width, height): (u32, u32), format: DXGI_FORMAT) {
         if self.done {
@@ -467,6 +233,7 @@ impl Notice {
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,42 +252,27 @@ mod tests {
         }
     }
 
-    /// The frame generation line fits the box and says what is shown.
-    #[test]
-    fn generated_frames_are_told() {
-        assert_eq!(generated(27.5, 1), "FRAME GEN OFF");
-        assert_eq!(generated(27.5, 6), "FRAME GEN 6X  SHOWN 165.0 FPS");
-        assert!(generated(999.9, 6).len() <= COLUMNS as usize);
-    }
-
     #[test]
     fn a_box_is_painted() {
+        let shape = Shape { columns: 4, lines: 2 };
         let lines = vec!["I".to_owned(), " i".to_owned()];
         for scale in [1, 2, 4] {
-            let (width, height) = size(PANEL, scale);
+            let (width, height) = size(shape, scale);
             let pitch = (width * 4).next_multiple_of(256) as usize;
             let colours = colours(DXGI_FORMAT_R10G10B10A2_UNORM).unwrap();
-            let picture = painted(&lines, PANEL, scale, colours, pitch);
+            let picture = painted(&lines, shape, scale, colours, pitch);
             assert_eq!(picture.len(), pitch * height as usize);
             let at = |x: u32, y: u32| &picture[y as usize * pitch + x as usize * 4..][..4];
             // The rim is black, the first letter's top row lit in its middle.
             assert_eq!(at(0, 0), colours[0]);
             assert_eq!(at((RIM + 2) * scale, RIM * scale), colours[1]);
-            assert_eq!(at((RIM + 2) * scale + scale - 1, RIM * scale + scale - 1), colours[1]);
+            let corner = ((RIM + 2) * scale + scale - 1, RIM * scale + scale - 1);
+            assert_eq!(at(corner.0, corner.1), colours[1]);
             assert_eq!(at(RIM * scale, RIM * scale), colours[0]);
             // Small letters are shown as capitals, a line and a cell on.
             assert_eq!(at((RIM + CELL.0 + 2) * scale, (RIM + CELL.1) * scale), colours[1]);
             // Nothing past a line's end.
             assert_eq!(at((RIM + CELL.0 * 2 + 2) * scale, (RIM + CELL.1) * scale), colours[0]);
         }
-    }
-
-    #[test]
-    fn counters_that_went_back_to_nothing_count_from_there() {
-        let (mut a, mut b) = (Counters::default(), Counters::default());
-        (a.0[0], b.0[0]) = (10, 30);
-        (a.0[1], b.0[1]) = (50, 20);
-        let c = b.since(a, 10.0);
-        assert_eq!((c[0], c[1]), (2.0, 2.0));
     }
 }

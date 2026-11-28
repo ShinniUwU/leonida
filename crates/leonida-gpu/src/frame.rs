@@ -56,8 +56,27 @@ fn parse_ms(spec: &str) -> Option<Duration> {
 struct Clock {
     start: Instant,
     interval: Duration,
+    /// The interval the title set (the sixtieth until it sets one).
+    title: Duration,
     /// The tick number at `start` (ticks go on across interval changes).
     first: u64,
+}
+
+impl Clock {
+    /// A clock at `interval` from now, after the last tick handed out.
+    fn from_now(title: Duration, interval: Duration) -> Clock {
+        let first = LAST
+            .iter()
+            .map(|t| t.load(Ordering::Relaxed))
+            .max()
+            .unwrap_or(0);
+        Clock {
+            start: Instant::now(),
+            interval,
+            title,
+            first,
+        }
+    }
 }
 
 static CLOCK: Mutex<Option<Clock>> = Mutex::new(None);
@@ -67,23 +86,30 @@ fn clock() -> std::sync::MutexGuard<'static, Option<Clock>> {
     CLOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// The interval frames begin at: `LEONIDA_FRAME_INTERVAL_MS` (with the
+/// title's own rate patched to match) first, then `LEONIDA_FRAME_INTERVAL_US`
+/// (our clock alone), then the title's.
+///
 /// `LEONIDA_FRAME_INTERVAL_US=<n>`: frames begin every `n` microseconds
 /// whatever interval the title sets (16667: 60 a second, 8333: 120, 1000:
-/// as fast as frames are made). The title sets 33,333 us (30 a second)
-/// against the 60 Hz mode it is offered; it times its own frames with the
-/// performance counter, so a shorter interval is a higher frame rate, not a
-/// faster game. Values outside 1,000..=1,000,000 are ignored.
-fn interval_override() -> Option<Duration> {
-    static OVERRIDE: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
-    *OVERRIDE.get_or_init(|| {
-        let us = std::env::var("LEONIDA_FRAME_INTERVAL_US").ok()?.trim().parse::<u64>().ok()?;
-        let interval = (1_000..=1_000_000).contains(&us).then(|| Duration::from_micros(us));
-        match interval {
-            Some(interval) => tracing::info!(?interval, "LEONIDA_FRAME_INTERVAL_US: frame interval overridden"),
-            None => tracing::warn!(us, "LEONIDA_FRAME_INTERVAL_US outside 1000..=1000000: ignored"),
-        }
-        interval
+/// as fast as frames are made; 0, the default, keeps the title's). The title
+/// sets 33,333 us (30 a second) against the 60 Hz mode it is offered; it
+/// times its own frames with the performance counter, so a shorter interval
+/// is a higher frame rate, not a faster game. Values outside
+/// 1,000..=1,000,000 are ignored. Live (`leonida_core::switches`): read at
+/// every wait, so the F1 menu's frame-rate cap applies at once.
+fn paced(title: Duration) -> Duration {
+    asked().unwrap_or_else(|| {
+        pick(leonida_core::switches::live_number("LEONIDA_FRAME_INTERVAL_US"), title)
     })
+}
+
+fn pick(us: f64, title: Duration) -> Duration {
+    if (1_000.0..=1_000_000.0).contains(&us) {
+        Duration::from_micros(us as u64)
+    } else {
+        title
+    }
 }
 
 /// Device method: a frame every `length` microseconds. The period is how
@@ -100,21 +126,10 @@ pub(crate) extern "system" fn set_interval(
         0 => SIXTIETH,
         us => Duration::from_micros(u64::from(us)),
     };
-    // LEONIDA_FRAME_INTERVAL_MS (with the title's own rate patched to match)
-    // first, then LEONIDA_FRAME_INTERVAL_US (our clock alone).
-    let interval = asked().or_else(interval_override).unwrap_or(asked_by_title);
+    let interval = paced(asked_by_title);
     tracing::info!(?interval, title = ?asked_by_title, period, flags, "frame interval");
     // A new interval starts from now, after the last tick handed out.
-    let first = LAST
-        .iter()
-        .map(|t| t.load(Ordering::Relaxed))
-        .max()
-        .unwrap_or(0);
-    *clock() = Some(Clock {
-        start: Instant::now(),
-        interval,
-        first,
-    });
+    *clock() = Some(Clock::from_now(asked_by_title, interval));
     S_OK
 }
 
@@ -153,11 +168,17 @@ fn last(kind: u32) -> &'static AtomicU64 {
 /// let the next one end on the same tick), and how long until it.
 fn next_tick(kind: u32) -> (u64, Duration) {
     let mut clock = clock();
-    let c = clock.get_or_insert_with(|| Clock {
-        start: Instant::now(),
-        interval: asked().or_else(interval_override).unwrap_or(SIXTIETH),
-        first: 0,
+    let c = clock.get_or_insert_with(|| {
+        let mut c = Clock::from_now(SIXTIETH, paced(SIXTIETH));
+        c.first = 0;
+        c
     });
+    // The cap changed (the F1 menu): the new pace starts from now.
+    let interval = paced(c.title);
+    if interval != c.interval {
+        tracing::info!(title = ?c.title, ?interval, "frame interval (LEONIDA_FRAME_INTERVAL_US)");
+        *c = Clock::from_now(c.title, interval);
+    }
     if c.interval.is_zero() {
         // No wait: every wait ends at once, on a tick of its own.
         let tick = last(kind).load(Ordering::Relaxed) + 1;
@@ -347,6 +368,17 @@ mod tests {
         assert_eq!(parse_ms("1001"), None);
         assert_eq!(parse_ms("NaN"), None);
         assert_eq!(parse_ms("fast"), None);
+    }
+
+    #[test]
+    fn the_cap_keeps_to_its_range() {
+        let title = Duration::from_micros(33_333);
+        assert_eq!(pick(0.0, title), title, "the default keeps the title's");
+        assert_eq!(pick(8_333.0, title), Duration::from_micros(8_333));
+        assert_eq!(pick(1_000.0, title), Duration::from_millis(1));
+        assert_eq!(pick(999.0, title), title);
+        assert_eq!(pick(1_000_001.0, title), title);
+        assert_eq!(pick(f64::NAN, title), title);
     }
 
     #[test]

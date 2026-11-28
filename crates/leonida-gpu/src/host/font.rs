@@ -1,5 +1,5 @@
-//! The dot letters the stats panel (`panel.rs`, diagnostics builds) and the settings menu
-//! (`menu.rs`, every build) are written with, and the pixels they are painted in.
+//! The dot letters the frame generation notice (`panel.rs`) is written with, and the pixels
+//! they are painted in.
 
 use windows::Win32::Graphics::Dxgi::Common::*;
 
@@ -46,7 +46,7 @@ pub(super) const fn glyph(c: u8) -> [u8; 7] {
         b'.' => [0, 0, 0, 0, 0, 0b01100, 0b01100],
         b'/' => [0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b01000, 0b10000],
         b'-' => [0, 0, 0, 0b11111, 0, 0, 0],
-        // For the settings menu (menu.rs).
+        // Signs the notice may use.
         b'>' => [0b01000, 0b00100, 0b00010, 0b00001, 0b00010, 0b00100, 0b01000],
         b'<' => [0b00010, 0b00100, 0b01000, 0b10000, 0b01000, 0b00100, 0b00010],
         b'*' => [0, 0b00100, 0b10101, 0b01110, 0b10101, 0b00100, 0],

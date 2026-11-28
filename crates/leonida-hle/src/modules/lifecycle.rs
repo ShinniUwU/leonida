@@ -405,6 +405,13 @@ pub(crate) fn end_title(why: &'static str, then: Box<dyn FnOnce() + Send>) {
     if ENDING.swap(true, Ordering::SeqCst) {
         return;
     }
+    // What the F1 menu changed and has not written yet goes into the shared
+    // settings file, so the launcher sees it.
+    match leonida_core::switches::save_now() {
+        Some(Ok(path)) => tracing::info!(path = %path.display(), "settings saved"),
+        Some(Err(e)) => tracing::warn!(error = %format!("{e:#}"), "settings not saved"),
+        None => {}
+    }
     let constrain = constrained().clone();
     let suspend = routines().clone();
     tracing::info!(

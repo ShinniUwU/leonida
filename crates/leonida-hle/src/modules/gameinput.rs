@@ -127,6 +127,22 @@ fn letter_position(vk: u8) -> Option<u32> {
     LETTER_POSITIONS.iter().find(|(_, letter)| *letter == vk).map(|&(scan, _)| scan)
 }
 
+/// What of the keys `held` reaches the game, with the F1 menu (`menu`: it is
+/// there, `LEONIDA_MENU`). F1 and F3 are the menu's. While it is `open`, and
+/// after it closed until every key is let go (the Esc that closed it would
+/// open the game's pause menu), none: `latched` carries that over polls.
+/// After VIctory-NVIDIA 86a3976.
+#[cfg(any(windows, test))]
+fn gate(held: &mut Vec<u8>, latched: &mut bool, open: bool, menu: bool) {
+    if menu {
+        held.retain(|&vk| vk != 0x70 && vk != 0x72);
+    }
+    *latched = open || (*latched && !held.is_empty());
+    if *latched {
+        held.clear();
+    }
+}
+
 /// Which of the stand-in pad's keys `key` is. A letter key counts by where
 /// it is, not by what the layout prints on it: with the virtual key, an
 /// AZERTY keyboard had forward on the key marked W, in the bottom row. Other
@@ -1238,8 +1254,9 @@ mod host {
         XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y, XINPUT_STATE, XINPUT_VIBRATION, XInputGetState,
         XInputSetState,
     };
+    use windows_sys::Win32::Foundation::POINT;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowThreadProcessId,
+        GetCursorPos, GetForegroundWindow, GetWindowInfo, GetWindowThreadProcessId, WINDOWINFO,
     };
 
     use super::*;
@@ -1288,6 +1305,12 @@ mod host {
         /// The input snapshot for this poll and the HID connection owning each slot.
         pads: [Option<PadState>; PADS],
         hid_slots: [Option<u64>; PADS],
+        /// Keys held at the last poll, for the F1 menu's presses.
+        held: Vec<u8>,
+        /// Keys are kept from the game (`gate`).
+        latched: bool,
+        /// The left button was down at the last poll with the menu open.
+        click_was_down: bool,
     }
 
     impl Host {
@@ -1304,6 +1327,45 @@ mod host {
             self.empty_until[slot] = None;
             Some(convert(&state.Gamepad))
         }
+
+        /// A left click while the F1 menu is `open` goes to the menu, not
+        /// the game (VIctory-NVIDIA 86a3976).
+        fn menu_click(&mut self, open: bool) {
+            if !open {
+                // A button held as the menu opens is not a click in it.
+                self.click_was_down = true;
+                return;
+            }
+            // SAFETY: plain query.
+            let down = unsafe { GetAsyncKeyState(0x01) } < 0;
+            if down
+                && !self.click_was_down
+                && let Some((fx, fy)) = cursor_in_client()
+            {
+                leonida_gpu::menu::click(fx, fy);
+            }
+            self.click_was_down = down;
+        }
+    }
+
+    /// Where the cursor is in the foreground window's client area, as
+    /// fractions of its width and height (for the F1 menu's clicks).
+    fn cursor_in_client() -> Option<(f32, f32)> {
+        let mut info = WINDOWINFO { cbSize: size_of::<WINDOWINFO>() as u32, ..Default::default() };
+        let mut pos = POINT::default();
+        // SAFETY: plain queries into our initialized structs; a null window
+        // fails.
+        let known = unsafe {
+            GetWindowInfo(GetForegroundWindow(), &mut info) != 0 && GetCursorPos(&mut pos) != 0
+        };
+        let rc = info.rcClient;
+        if !known || rc.right - rc.left < 64 || rc.bottom - rc.top < 64 {
+            return None;
+        }
+        Some((
+            (pos.x - rc.left) as f32 / (rc.right - rc.left) as f32,
+            (pos.y - rc.top) as f32 / (rc.bottom - rc.top) as f32,
+        ))
     }
 
     impl Source for Host {
@@ -1348,22 +1410,29 @@ mod host {
         }
 
         fn keys(&mut self) -> Vec<KeyState> {
-            // The F1 settings menu takes the keyboard while it is shown.
-            if leonida_gpu::SETTINGS_MENU_OPEN.load(std::sync::atomic::Ordering::Relaxed) {
-                return Vec::new();
-            }
             let mut down = scripted();
             let scripted_keys = down.len();
-            if focused() {
+            let focused = focused();
+            let mut held: Vec<u8> = Vec::new();
+            if focused {
                 // Left/right modifier keys only, as devices report them; no
                 // mouse buttons (below 0x08).
-                let held: Vec<u8> = (0x08..=0xFE_u8)
-                    .filter(|vk| !(0x10..=0x12).contains(vk) && !down.contains(vk))
+                held = (0x08..=0xFE_u8)
+                    .filter(|vk| !(0x10..=0x12).contains(vk))
                     // SAFETY: plain queries.
                     .filter(|&vk| unsafe { GetAsyncKeyState(i32::from(vk)) } < 0)
                     .collect();
-                down.extend(held);
             }
+            // Keys pressed since the last poll go to the F1 menu first; it
+            // takes the keyboard while it is shown.
+            let pressed: Vec<u8> =
+                held.iter().copied().filter(|vk| !self.held.contains(vk)).collect();
+            self.held.clone_from(&held);
+            let open = leonida_gpu::menu::input(&pressed);
+            self.menu_click(open && focused);
+            gate(&mut held, &mut self.latched, open, leonida_gpu::menu::enabled());
+            held.retain(|vk| !down.contains(vk));
+            down.extend(held);
             down.into_iter()
                 .enumerate()
                 .map(|(i, vk)| KeyState {
@@ -1580,6 +1649,30 @@ mod tests {
     use crate::HostPolicy;
     use leonida_loader::Provenance;
     use leonida_pe::ImportSymbol;
+
+    #[test]
+    fn the_game_gets_no_keys_while_the_menu_is_open_or_a_key_from_it_is_held() {
+        let mut latched = false;
+        let mut keys = |held: &[u8], open: bool, menu: bool| {
+            let mut held = held.to_vec();
+            gate(&mut held, &mut latched, open, menu);
+            held
+        };
+        assert_eq!(keys(&[b'W', 0x70], false, true), b"W", "F1 is the menu's");
+        assert_eq!(keys(&[b'W', 0x70], false, false), [b'W', 0x70], "no menu");
+        assert!(keys(b"W", true, true).is_empty(), "open");
+        // Closed with Esc still held: kept from the game until let go.
+        assert!(keys(&[0x1B], false, true).is_empty());
+        assert!(keys(&[0x1B, b'W'], false, true).is_empty());
+        assert!(keys(&[], false, true).is_empty());
+        assert_eq!(keys(b"W", false, true), b"W");
+        // Closed with F1 while S is held: S waits to be let go, F1 never
+        // reaches the game.
+        assert!(keys(&[], true, true).is_empty());
+        assert_eq!(keys(&[0x70, b'S'], false, true), Vec::<u8>::new());
+        assert_eq!(keys(&[0x70], false, true), Vec::<u8>::new());
+        assert_eq!(keys(b"S", false, true), b"S");
+    }
 
     #[derive(Default)]
     struct FakeHost {

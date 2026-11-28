@@ -4024,7 +4024,6 @@ mod card_steps;
 #[cfg(feature = "diagnostics")]
 pub(crate) mod indirects;
 mod font;
-mod menu;
 mod panel;
 mod place;
 mod send;
@@ -9460,12 +9459,8 @@ struct Presenter {
     hwnd: HWND,
     meter: Meter,
     composer: Option<crate::compose::Composer>,
-    /// The numbers panel (F3), in every build.
-    panel: panel::Panel,
     /// What the card does for frame generation, for the first seconds.
     notice: panel::Notice,
-    /// The F1 settings menu.
-    menu: menu::Menu,
     /// The swap chain lets a frame be shown at once ([`tearing`]): its flags, kept for
     /// ResizeBuffers, which may not change them.
     tearing: bool,
@@ -9503,12 +9498,6 @@ fn chain_flags(tearing: bool) -> DXGI_SWAP_CHAIN_FLAG {
     if tearing { DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING } else { DXGI_SWAP_CHAIN_FLAG(0) }
 }
 
-/// The frame rate, shown in the window's caption every second and logged
-/// every few seconds.
-/// The frame rate the meter last counted, in tenths of a frame a second (0: none yet): for the
-/// line at the top of the picture (`menu.rs`).
-pub(crate) static METER_FPS_TENTHS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
 /// Logs how even the frames since the last line were: the median, the 95th
 /// and 99th percentile and the longest interval between presents, and how
 /// many took over 50 and over 100 ms (a frame rate of 30 with every frame
@@ -9534,6 +9523,8 @@ fn frame_times_line(intervals: &mut Vec<f32>) {
     intervals.clear();
 }
 
+/// The frame rate, shown in the window's caption every second and logged
+/// every few seconds.
 struct Meter {
     since: std::time::Instant,
     frames: u32,
@@ -9565,11 +9556,6 @@ impl Meter {
         }
     }
 
-    /// Whether the next frame counted makes the frame-rate line.
-    fn line_due(&self) -> bool {
-        self.since.elapsed() >= std::time::Duration::from_secs(1)
-    }
-
     /// Counts a presented frame.
     fn frame(&mut self, hwnd: HWND) {
         #[cfg(feature = "diagnostics")]
@@ -9593,7 +9579,7 @@ impl Meter {
         let frames = f64::from(self.frames);
         let fps = frames / elapsed.as_secs_f64();
         let ms = elapsed.as_secs_f64() * 1000.0 / frames;
-        METER_FPS_TENTHS.store((fps * 10.0).round() as u32, Ordering::Relaxed);
+        crate::fpsbox::set(fps);
         let draws = (drawn - self.drawn) as f64 / frames;
         (self.since, self.frames, self.drawn) = (std::time::Instant::now(), 0, drawn);
         // Of a frame, ms preparing submissions and ms waiting for the GPU.
@@ -9608,6 +9594,20 @@ impl Meter {
             COPY_BACK[i].swap(0, Ordering::Relaxed) as f64 / [1e3, 1e6][i] / frames
         });
         let dropped = crate::draw::take_dropped() as f64 / frames;
+        crate::panel::measured(crate::panel::Stats {
+            fps,
+            ms,
+            draws,
+            cpu_ms: cpu,
+            gpu_ms: gpu,
+            upload_mb: copy_mb + texture_mb + back_mb,
+            dropped,
+            memory: if crate::panel::shown() {
+                host().and_then(|h| h.video_memory())
+            } else {
+                None
+            },
+        });
         let indirect = crate::list::take_indirect() as f64 / frames;
         let left_out = crate::pipeline::take_left_out() as f64 / frames;
         let mesh_largest = MESH_GROUPS[0].swap(0, Ordering::Relaxed);
@@ -10272,9 +10272,11 @@ impl Host {
             } else {
                 crate::popwatch::take(&self.device, list, texture)
             };
-            p.panel.draw(self, copy, &back, (width, height), format);
+            // The frame rate, the F3 panel and the F1 menu, onto what is shown
+            // (not onto the title's own frame, which the lines above read back).
+            crate::fpsbox::draw(self, list, &back, (width, height, format));
             p.notice.draw(self, copy, &back, (width, height), format);
-            p.menu.draw(self, copy, &back, (width, height), format);
+            crate::overlay::draw(self, list, &back, (width, height, format));
             #[cfg(not(feature = "diagnostics"))]
             let _ = frame;
             if composed {
@@ -10355,8 +10357,6 @@ impl Host {
             crate::streamline::present_returned(called);
             crate::streamline::present_ends(presenting);
             showing.next("the frame meter");
-            p.panel.frame(p.meter.line_due());
-            p.menu.frame();
             p.meter.frame(p.hwnd);
             showing.end();
             #[cfg(feature = "diagnostics")]
@@ -10449,9 +10449,7 @@ impl Host {
                 hwnd,
                 meter: Meter::new(),
                 composer: None,
-                panel: panel::Panel::new(),
                 notice: panel::Notice::new(),
-                menu: menu::Menu::new(),
                 tearing,
                 presents_tearing: tearing,
                 present_refused: false,
