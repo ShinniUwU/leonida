@@ -15,6 +15,7 @@
 //! share, [`console`] which console model the title sees. Planned:
 //! `present` (swap chain).
 
+pub mod adapter;
 #[cfg(windows)]
 mod ambient;
 #[cfg(all(windows, feature = "diagnostics"))]
@@ -37,6 +38,8 @@ pub mod dxgi;
 mod external;
 pub mod fence;
 pub mod frame;
+#[cfg(windows)]
+mod framelog;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod book;
 #[cfg(windows)]
@@ -128,6 +131,15 @@ pub fn frame_phase() -> u32 {
 /// Frames the title has begun (its frame waits that ended), for logs.
 pub fn frames_begun() -> u64 {
     frame::current()
+}
+
+/// Starts the host device and reads its view limit, as the first run does
+/// before it translates a shader. The offline warm-up calls it so its
+/// translations land under the run's key. False: there is no host device.
+#[cfg(windows)]
+pub fn probe_translation_host() -> bool {
+    descriptor::host::probe_view_limit();
+    host::host().is_some()
 }
 #[cfg(windows)]
 pub use inplace::{title_memory_freeing, title_memory_section, title_memory_section_gone, title_memory_view};

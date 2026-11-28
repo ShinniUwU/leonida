@@ -5105,7 +5105,7 @@ mod many_askers_tests {
         super::title_memory_allocated(at, PAGE);
         assert!(!super::published(at, end));
         let (_, all) = ask(fifth);
-        assert_eq!(all, []);
+        assert_eq!(all, [0usize; 0]);
         // A reservation of the ordinary kind is no placeholder.
         let plain = unsafe { VirtualAlloc(std::ptr::null(), PAGE, MEM_RESERVE, PAGE_NOACCESS) } as usize;
         assert!(!super::placeholder(plain / PAGE));

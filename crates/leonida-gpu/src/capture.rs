@@ -120,6 +120,21 @@ fn world_on() -> bool {
     *ON.get_or_init(|| std::env::var_os("LEONIDA_CAPTURE_WORLD").is_some())
 }
 
+/// How many frames apart the world's pictures are saved with
+/// `LEONIDA_CAPTURE_WORLD` (`LEONIDA_CAPTURE_WORLD_EVERY`, 8 unless said).
+/// A saved frame is read back and written inside the present, which costs
+/// its frame about 235 ms: a run that measures speed asks for 64 or more.
+fn world_every() -> u64 {
+    static EVERY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *EVERY.get_or_init(|| {
+        std::env::var("LEONIDA_CAPTURE_WORLD_EVERY")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(8)
+    })
+}
+
 /// The first frame that ran 500 draws or more (`LEONIDA_CAPTURE_WORLD`).
 static WORLD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
 
@@ -147,11 +162,15 @@ pub(crate) fn wanted(n: u64) -> bool {
     // Before the world, with `LEONIDA_CAPTURE_WORLD`: every 16th frame too
     // (small pictures of menus, loading screens and title cards).
     let before_world = world_on() && n.is_multiple_of(16) && WORLD.load(std::sync::atomic::Ordering::Relaxed) == u64::MAX;
-    // In the world: every 8th frame's picture, a timeline of the opening
-    // cutscene (its shots do not fall on the same frame numbers from run to
-    // run, so single frames cannot be compared between runs).
+    // In the world: every 8th frame's picture ([`world_every`]), a timeline
+    // of the opening cutscene (its shots do not fall on the same frame
+    // numbers from run to run, so single frames cannot be compared between
+    // runs).
     let first = WORLD.load(std::sync::atomic::Ordering::Relaxed);
-    let in_world = world_on() && first != u64::MAX && n > first && (n - first).is_multiple_of(8);
+    let in_world = world_on()
+        && first != u64::MAX
+        && n > first
+        && (n - first).is_multiple_of(world_every());
     folder().is_some() && (n.is_power_of_two() || listed(n) || before_world || in_world)
 }
 

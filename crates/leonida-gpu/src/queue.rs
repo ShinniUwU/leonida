@@ -923,6 +923,13 @@ extern "system" fn present(
     plane_parameters: *const Plane,
     _parameters: *const u8,
 ) -> HRESULT {
+    let hr = present_now(this, planes, plane_parameters);
+    #[cfg(windows)]
+    crate::framelog::frame();
+    hr
+}
+
+fn present_now(this: This, planes: u32, plane_parameters: *const Plane) -> HRESULT {
     #[cfg(not(windows))]
     let _ = this;
     #[cfg(all(windows, feature = "diagnostics"))]

@@ -1,20 +1,18 @@
 //! The F1 settings menu. F1 shows and hides it while our window has the
 //! focus; Up/Down pick a setting, Left/Right change it, Enter runs the line
 //! picked (save, save and restart, preload shaders, reset, close), Esc
-//! closes. Preloading saves, ends this run and has the launcher make every
-//! shader before the title starts again (`LEONIDA_PRELOAD=1`, `leonida
-//! preload`); it asks for a second Enter first. While it is
-//! shown the title sees no keyboard (`crate::SETTINGS_MENU_OPEN`, read by the
-//! input module); a pad still works.
+//! closes. Preloading only saves: warm the cache with `leonida translate
+//! --warm all` before the next start. It asks for a second Enter first.
+//! While it is shown the title sees no keyboard (`crate::SETTINGS_MENU_OPEN`,
+//! read by the input module); a pad still works.
 //!
 //! The settings are read once at start, so a change is saved to the file
-//! `LEONIDA_MENU_FILE` names (`scripts\play-foxhound.ps1` sets it to
-//! `leonida-settings.txt` in the repository's folder and applies it at every
-//! start) and takes effect at the next start; "SAVE AND RESTART" starts the
-//! launcher again (`LEONIDA_MENU_PLAY`, with `LEONIDA_MENU_ARGS`) and ends
-//! this run. The `LEONIDA_MENU_...` settings are the launcher's own choices
-//! (DLSS mode, frame generation, frame rate, console, picture size), which it
-//! turns into the layer's switches; the others are the switches themselves.
+//! `LEONIDA_MENU_FILE` names (nothing is saved when it is unset; nothing in
+//! Leonida reads that file back) and would take effect at the next start;
+//! "SAVE AND RESTART" only says to start the game again (the game starts no
+//! process). The `LEONIDA_MENU_...` settings were the upstream launcher's own
+//! choices (DLSS mode, frame generation, frame rate, console, picture size);
+//! the others are the switches themselves.
 //!
 //! In every build, as the stats panel is. Drawn as
 //! that panel is: white text on a black box, copied onto the swap chain's
@@ -53,8 +51,8 @@ const ABOUT_PRELOAD: [&str; 3] = [
 const MFG: &str = "LEONIDA_MFG_UNLOCKER";
 const ABOUT_MFG: [&str; 3] = [
     "A MOD, NOT OURS: DLSS FRAME GEN ON RTX 20 AND 30 CARDS.",
-    "ON: DOWNLOADED FROM ITS GITHUB AT THE NEXT START, THEN RUN.",
-    "NVIDIA DOES NOT SUPPORT IT. IF THE GAME FAILS, TURN IT OFF.",
+    "NOT IN LEONIDA: NOTHING DOWNLOADS OR LOADS IT.",
+    "THE SETTING IS SAVED AND OTHERWISE IGNORED.",
 ];
 /// The note after the first Enter on it: the second one does it.
 const CONFIRM_PRELOAD: &str = "ENTER AGAIN: SAVE, CLOSE THE GAME AND PRELOAD";
@@ -140,45 +138,6 @@ pub(crate) fn warmup_notice(seconds: u64) -> Vec<String> {
         "WITHOUT IT THE FIRST RUN STAYS AT ABOUT 14 FPS".to_owned(),
         String::new(),
     ]
-}
-
-/// Starts `command_line` in a console window of its own, with that console's input and output.
-/// (`std::process::Command` always hands its child this process's standard handles: the restarted
-/// launcher then wrote into the old launcher's pipe and log, not its own window, and kept the old
-/// launcher waiting on that pipe.)
-fn new_console(command_line: &str) -> std::io::Result<()> {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{CREATE_NEW_CONSOLE, CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW};
-    let mut line: Vec<u16> = command_line.encode_utf16().chain(Some(0)).collect();
-    // SAFETY: plain structs, zero is their empty value.
-    let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
-    startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-    let mut process: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
-    // SAFETY: `line` is a writable, terminated UTF-16 string; no handles inherited; this
-    // process's environment and folder.
-    let made = unsafe {
-        CreateProcessW(
-            std::ptr::null(),
-            line.as_mut_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            0,
-            CREATE_NEW_CONSOLE,
-            std::ptr::null(),
-            std::ptr::null(),
-            &startup,
-            &mut process,
-        )
-    };
-    if made == 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: the two handles CreateProcessW gave, closed once.
-    unsafe {
-        CloseHandle(process.hThread);
-        CloseHandle(process.hProcess);
-    }
-    Ok(())
 }
 
 /// Whether a change of `item` shows at once. Frame generation does when this run started with
@@ -456,7 +415,7 @@ impl Menu {
     /// Writes the changed values over those in the settings file.
     fn save(&mut self) -> bool {
         let Some(path) = std::env::var_os("LEONIDA_MENU_FILE") else {
-            self.note = "NO SETTINGS FILE: START WITH LEONIDA PLAY".to_owned();
+            self.note = "NOT SAVED: LEONIDA_MENU_FILE IS NOT SET".to_owned();
             return false;
         };
         let mut kept: Vec<(String, String)> = std::fs::read_to_string(&path)
@@ -491,44 +450,15 @@ impl Menu {
         }
     }
 
-    /// Starts the launcher again in a new console, a few seconds on, and ends this run.
-    /// `preload`: the launcher makes every shader first (`LEONIDA_PRELOAD=1`, for that start alone).
+    /// Leonida starts no launcher or other process from the game: the player
+    /// starts the game again (`leonida run`, or `run-gta6.ps1`).
     fn restart(&mut self, preload: bool) {
-        let Some(play) = std::env::var_os("LEONIDA_MENU_PLAY") else {
-            self.note = "SAVED. START THE LAUNCHER AGAIN YOURSELF".to_owned();
-            return;
-        };
-        let play = play.to_string_lossy().replace('\'', "''");
-        let args = get("LEONIDA_MENU_ARGS");
-        // The preload is asked by LEONIDA_PRELOAD=1, which both launchers read (leonida.exe's is
-        // `--preload`, the script's `-Preload`: the script's flag given to leonida.exe was refused,
-        // and the window closed before it could be read, 2026-11-27). A launcher that fails keeps
-        // its window until Enter.
-        let command = format!(
-            "Start-Sleep 3; {}& '{play}' {args}; if ($LASTEXITCODE) {{ Read-Host 'The start failed (see above). Press Enter to close this window' }}",
-            if preload { "$env:LEONIDA_PRELOAD='1'; " } else { "" }
-        );
-        match new_console(&format!("powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"{}\"", command.replace('"', "\\\""))) {
-            Ok(()) => {
-                tracing::info!(command, preload, "settings menu: restarting");
-                // Ended at once: std::process::exit runs the DLLs' unloading, which with
-                // Streamline loaded did not come back (a windowless leftover process).
-                // SAFETY: this process, with nothing of its own left to save.
-                unsafe {
-                    use windows_sys::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
-                    TerminateProcess(GetCurrentProcess(), 0);
-                }
-                std::process::exit(0);
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "settings menu: restart failed");
-                self.note = "SAVED, BUT THE RESTART FAILED".to_owned();
-            }
-        }
+        let _ = preload;
+        self.note = "SAVED. START THE GAME AGAIN YOURSELF".to_owned();
     }
 
-    /// The warm-up start ([`warmup_seconds`]): once its time is up, this exe is
-    /// marked as warmed up (`LEONIDA_WARMUP_MARK`) and the game starts again.
+    /// The warm-up start ([`warmup_seconds`]): once its time is up, the note
+    /// asks for a restart; the game does not restart itself or write a mark.
     fn warmup(&mut self) {
         static BEGAN: OnceLock<std::time::Instant> = OnceLock::new();
         static DONE: AtomicBool = AtomicBool::new(false);
@@ -540,14 +470,7 @@ impl Menu {
             return;
         }
         DONE.store(true, Ordering::Relaxed);
-        let mark = std::path::PathBuf::from(get("LEONIDA_WARMUP_MARK"));
-        if !mark.as_os_str().is_empty() {
-            if let Some(dir) = mark.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            let _ = std::fs::write(&mark, "this leonida.exe was warmed up (its first start, then a restart)\r\n");
-        }
-        tracing::info!(seconds, mark = %mark.display(), "first start of this leonida.exe: warmed up; the game starts again");
+        tracing::info!(seconds, "first start of this leonida.exe: warmed up");
         self.restart(false);
     }
 

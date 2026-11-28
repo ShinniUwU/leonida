@@ -298,8 +298,8 @@ mod tests {
     fn unorm16_unorm8_clamping_and_unknown_formats_expand_correctly() {
         // Vertex layout (12 bytes):
         //   0..4: R16G16_UNORM (format 35)
-        //   4..8: R8G8B8A8_UNORM (format 28) — tests clamping below 0 and above 1
-        //   8..12: unknown format (999) — must keep v0's bytes verbatim
+        //   4..8: R8G8B8A8_UNORM (format 28): tests clamping below 0 and above 1
+        //   8..12: unknown format (999): must keep v0's bytes verbatim
         let v = |u0: u16, u1: u16, c: [u8; 4], raw: [u8; 4]| {
             let mut b = Vec::with_capacity(12);
             b.extend(u0.to_le_bytes());

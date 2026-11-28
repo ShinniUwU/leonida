@@ -134,7 +134,7 @@ mod tests {
 
     #[test]
     fn a_missing_value_reads_as_the_default() {
-        assert_eq!(dword("VictoryTestNoSuchValue"), None);
+        assert_eq!(dword("LeonidaTestNoSuchValue"), None);
     }
 
     #[test]
