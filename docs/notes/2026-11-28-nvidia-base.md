@@ -77,6 +77,23 @@ fade while cutscenes were held: run 01's has a black-frame warning at the same t
 FSR 3 frame generation was switched off for those seconds. Later shots of the same runs and run
 03's shots at 600, 1,000 and 1,500 frames have a picture. Nobody judged the pictures yet.
 
+### Known issues
+
+Seen by the owner on the same PC, not fixed here:
+
+- **The cutscene skipper does not skip.** With `LEONIDA_SKIP_SCENES=1` (off by default) Enter is
+  held while a letterboxed cutscene shows, as on `main`, but on this base the cutscenes play out:
+  the holds last about 100 s each.
+- **Black water near a mission marker.** In the first boat mission the water around the
+  objective marker is black.
+- **The GTA V keys can't see vehicles.** They guess on foot or driving from `F` alone, so when
+  the title puts the player in a vehicle or takes them out by itself (or `F` finds no vehicle
+  near), `W` and `S` do the wrong thing until `F2` is pressed.
+
+`main`'s `LEONIDA_WAVE64_GROUP_WIDE` and `LEONIDA_WAVE_WHY` (#121) are not on this base: the new
+shader crate has none of the code they change, so they were dropped when the branch was rebased
+onto `main` b89f2af7.
+
 ### Settings check
 
 A settings file in the menu's format with only `LEONIDA_FRAME_INTERVAL_US=25000` (a 40 fps cap),
