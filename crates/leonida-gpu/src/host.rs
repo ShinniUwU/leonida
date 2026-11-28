@@ -10272,6 +10272,28 @@ impl Host {
             } else {
                 crate::popwatch::take(&self.device, list, texture)
             };
+            // `LEONIDA_SKIP_SCENES`: a sample whose list has finished is
+            // judged, and a new one recorded when due (of the picture before
+            // the overlays: the composed one, or the title's frame).
+            let sampled = crate::skip::on() && {
+                crate::skip::landed(FINISHED.load(Ordering::Acquire));
+                if composed {
+                    list.ResourceBarrier(&[transition(
+                        &back,
+                        D3D12_RESOURCE_STATE_COPY_DEST,
+                        D3D12_RESOURCE_STATE_COPY_SOURCE,
+                    )]);
+                    let sampled = crate::skip::record(&self.device, list, &back, frame);
+                    list.ResourceBarrier(&[transition(
+                        &back,
+                        D3D12_RESOURCE_STATE_COPY_SOURCE,
+                        D3D12_RESOURCE_STATE_COPY_DEST,
+                    )]);
+                    sampled
+                } else {
+                    crate::skip::record(&self.device, list, texture, frame)
+                }
+            };
             // The frame rate, the F3 panel and the F1 menu, onto what is shown
             // (not onto the title's own frame, which the lines above read back).
             crate::fpsbox::draw(self, list, &back, (width, height, format));
@@ -10324,8 +10346,10 @@ impl Host {
             if let Some(taken) = watched {
                 crate::popwatch::sent(taken, flown, frame);
             }
-            #[cfg(not(feature = "diagnostics"))]
-            let _ = flown;
+            if sampled {
+                crate::skip::sent(flown);
+                crate::skip::landed(FINISHED.load(Ordering::Acquire));
+            }
             #[cfg(feature = "diagnostics")]
             if let Some((buffer, footprint)) = capture {
                 crate::capture::save_read_back(frame, &buffer, &footprint);

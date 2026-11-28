@@ -1574,7 +1574,8 @@ mod host {
     /// 0.2 s that long after input starts (`<from>-<to>:<key>`: all that
     /// time), with or without focus. Keys as [`key_code`] names them (the
     /// stand-in pad's table maps them to buttons). Also the keys of
-    /// [`live`] (`LEONIDA_KEYS_FILE`).
+    /// [`live`] (`LEONIDA_KEYS_FILE`), and with `LEONIDA_SKIP_SCENES=1`
+    /// Enter while the picture shows a cutscene (`leonida_gpu::skip`).
     fn scripted() -> Vec<u8> {
         static SCRIPT: LazyLock<(Instant, Vec<(Duration, Duration, u8)>)> = LazyLock::new(|| {
             let list = std::env::var("LEONIDA_KEYS").unwrap_or_default();
@@ -1601,6 +1602,9 @@ mod host {
             if !down.contains(&vk) {
                 down.push(vk);
             }
+        }
+        if leonida_gpu::skip::hold_enter() && !down.contains(&0x0D) {
+            down.push(0x0D);
         }
         down
     }

@@ -1011,6 +1011,11 @@ fn present_now(this: This, planes: u32, plane_parameters: *const Plane) -> HRESU
             crate::capture::dump_targets(frame);
         }
     }
+    // `LEONIDA_SKIP_SCENES`: whether Enter is held from this present on.
+    #[cfg(windows)]
+    if crate::skip::on() {
+        crate::skip::present(frame, crate::draw::drawn());
+    }
     #[cfg(windows)]
     if behind::on() && !this.is_null() {
         const COPY_SOURCE: u32 = 0x800;
