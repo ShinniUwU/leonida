@@ -1316,9 +1316,9 @@ extern "system" fn enqueue_status(this: QueueRef, array: Array, index: u32) {
 /// did. The title's batches (up to 4,095 requests, in queues of 4,159) hold
 /// more than half now and then, and it maps the pages they go to and fills
 /// in their page lists in its own submit, after it has enqueued them all
-/// (image +0xe88f0: the batch's mapping list first, at +0xf2c470, which
-/// writes the page lists at +0x55aa6a0; then the status entry; then our
-/// submit). So 2,079 requests, three or four times a load, ran on lists of
+/// (the batch's page mappings first, which fill in the page lists; then the
+/// status entry; then our submit). So 2,079 requests, three or four times a
+/// load, ran on lists of
 /// page 0, or, worse, of the pages the addresses had shown before: their
 /// data went into whatever those pages belonged to by then, and the pages it
 /// was for stayed as they were.

@@ -440,7 +440,7 @@ pub fn init(asked: &Asked) -> Available {
     // FSR 3 frame generation needs DLSS for the upscaling, on either console. On Series X the
     // title's own FidelityFX takes the Series S sizes only and the title fails without DLSS; on
     // Series S, with its own FidelityFX upscaler running beside our frame generation, the title
-    // stopped on a check (0x80000003 at +0x2219650) seconds into the start (2026-11-27: muted
+    // stopped on a breakpoint check (0x80000003) seconds into the start (2026-11-27: muted
     // runs here, issues #272, #308 and #331; with DLSS on, both consoles ran).
     let fsr_needs_dlss = asked.fsr_framegen && !available.dlss;
     if fsr_needs_dlss {
@@ -1267,7 +1267,7 @@ fn frame_token(sl: &Sl, index: u32) -> Option<*mut abi::FrameToken> {
 pub fn upscale(up: &Upscale) -> Taken {
     // DLSS given up: the title's own upscaling alone, as in a start without NVIDIA's files.
     // Nothing is noted for frame generation (turned off with it, `ngx_evaluate_failed`): the
-    // title's FidelityFX beside our frame generation stops the title on a check (+0x2219650).
+    // title's FidelityFX beside our frame generation stops the title on a check.
     if DLSS_GIVEN_UP.load(Relaxed) {
         return Taken::No("the driver refused DLSS's upscalings (DLSS and frame generation are off for the run)");
     }
