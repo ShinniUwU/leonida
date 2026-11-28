@@ -2,10 +2,11 @@
 //! `LEONIDA_*` name, a short label, one line of help, the group it is shown
 //! in, the values it takes with their labels, what the code does without it
 //! (`default`), and whether a change applies while the game runs (`live`).
-//! The F1 settings menu shows the live ones, and the few restart ones it
-//! names, chosen for the next start ([`set_for_next_start`]); the launcher
-//! reads the whole list from `leonida config --switches-json` and shows the
-//! others as needing a restart, so neither hard-codes it.
+//! The F1 settings menu shows the live ones only; the launcher reads the
+//! whole list from `leonida config --switches-json` and shows the restart
+//! ones as needing a restart, so neither hard-codes it. In the game a
+//! restart switch is chosen for the next start with [`set_for_next_start`]
+//! (the F1 menu no longer does).
 //!
 //! A switch is live only when changing it mid-game is safe: it is read every
 //! frame or at each use, never decides device, heap, queue or swap-chain

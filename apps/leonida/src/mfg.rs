@@ -1,15 +1,17 @@
 //! MFG Unlocker as an opt-in: someone else's mod (github.com/dashdogy/MFG-Unlocker,
 //! MIT licence) that unlocks DLSS Frame Generation on GeForce RTX 20 and 30
 //! cards, which NVIDIA does not support; it was not tested with this game.
-//! `LEONIDA_MFG_UNLOCKER=1` turns it on (F1, FRAME GENERATION, MFG UNLOCKER, or
-//! a yes to the question below); unset or 0, nothing of it is fetched or run.
+//! `LEONIDA_MFG_UNLOCKER=1` turns it on (MFG UNLOCKER in the Leonida launcher,
+//! or a yes to the question below); unset or 0, nothing of it is fetched or
+//! run. It applies at a start, so the F1 menu does not show it.
 //!
 //! - The question, default no: once, at the start of `leonida run`, on an RTX
 //!   20 or 30 with DLSS and DLSS Frame Generation asked for, where the switch
 //!   was never set (by hand, in the settings file, `leonida.toml` or a
 //!   profile) and no mod DLL sits beside leonida.exe already; only with a
-//!   terminal to answer in. A yes goes into the settings file, as the F1 menu
-//!   would put it; a no is kept (a `declined` file) and not asked again.
+//!   terminal to answer in. A yes goes into the settings file, as the
+//!   launcher would put it; a no is kept (a `declined` file) and not asked
+//!   again.
 //! - On, with DLSS Frame Generation asked for: `scripts\get-mfg-unlocker.ps1`
 //!   (carried in the executable) fetches it where it is missing from the
 //!   mod's GitHub release into `%LOCALAPPDATA%\leonida\mfg-unlocker`, checked
@@ -106,7 +108,7 @@ pub(crate) fn start(asked: &Asked) {
     match streamline::load_mod(NAME, &dll, &pin) {
         Ok(()) => println!(
             "mfg unlocker   loaded ({}); Backspace opens its menu. NVIDIA does not support it: \
-             if the game fails, turn it off (F1, MFG UNLOCKER)",
+             if the game fails, turn it off (MFG UNLOCKER in the Leonida launcher)",
             dll.display()
         ),
         Err(why) => println!("mfg unlocker   not loaded: {why}; the game runs without it"),
@@ -128,8 +130,9 @@ const QUESTION: &str = "\
 and later. MFG Unlocker, someone else's mod (github.com/dashdogy/MFG-Unlocker, MIT
 licence, about 5 MB), unlocks it on RTX 20 and 30 cards. NVIDIA does not support that,
 and it was not tested with this game. On, it is downloaded now from its GitHub release
-(checked against its published SHA-256) and loaded at every start; F1, MFG UNLOCKER
-turns it off again. Off, AMD's FSR 3 frame generation (2x) is used where it is set up.";
+(checked against its published SHA-256) and loaded at every start; MFG UNLOCKER in the
+Leonida launcher turns it off again. Off, AMD's FSR 3 frame generation (2x) is used
+where it is set up.";
 
 /// Asks once whether to turn it on. No is the default: it is someone else's
 /// mod, NVIDIA does not support what it does, and it was not tested here.
@@ -149,8 +152,9 @@ fn ask(card: &str) -> bool {
     }
     if !says_yes(&answer) {
         let _ = std::fs::create_dir_all(&home);
-        let _ = std::fs::write(&declined, "asked once; F1, MFG UNLOCKER turns it on\n");
-        println!("Left off; not asked again. F1, MFG UNLOCKER turns it on.");
+        let on = "MFG UNLOCKER in the Leonida launcher turns it on";
+        let _ = std::fs::write(&declined, format!("asked once; {on}\n"));
+        println!("Left off; not asked again. {on}.");
         return false;
     }
     true
@@ -162,7 +166,7 @@ fn says_yes(answer: &str) -> bool {
     answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes")
 }
 
-/// The yes: into the settings file, as the F1 menu would put it, and on for
+/// The yes: into the settings file, as the launcher would put it, and on for
 /// this start.
 fn turn_on() {
     let on = BTreeMap::from([(SWITCH.to_owned(), "1".to_owned())]);
