@@ -127,20 +127,11 @@ pub(crate) fn cursor_locked() -> bool {
     CURSOR_LOCKED.load(Ordering::Relaxed)
 }
 
-/// Parses an opt-in boolean environment variable (`1`, `true`, `yes`, `on`,
-/// ignoring surrounding whitespace and ASCII case).
-fn parse_env_flag(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
-}
-
 /// GTA V PC-style keyboard + mouse stand-in pad (`LEONIDA_KBM_GTA=1`).
 /// Off by default so the existing keyboard table and tests stay unchanged.
 fn gta_kbm() -> bool {
     static ENABLED: LazyLock<bool> =
-        LazyLock::new(|| std::env::var("LEONIDA_KBM_GTA").is_ok_and(|v| parse_env_flag(&v)));
+        LazyLock::new(|| std::env::var_os("LEONIDA_KBM_GTA").is_some_and(|v| v == "1"));
     *ENABLED
 }
 
@@ -162,7 +153,7 @@ fn mouse_sens() -> f32 {
 #[cfg(windows)]
 fn mouse_invert_y() -> bool {
     static INVERT: LazyLock<bool> =
-        LazyLock::new(|| std::env::var("LEONIDA_MOUSE_INVERT_Y").is_ok_and(|v| parse_env_flag(&v)));
+        LazyLock::new(|| std::env::var_os("LEONIDA_MOUSE_INVERT_Y").is_some_and(|v| v == "1"));
     *INVERT
 }
 
@@ -1432,7 +1423,10 @@ mod host {
         }
 
         fn mouse_pad(&mut self, active: bool) -> PadState {
-            if !gta_kbm() || !active {
+            if !gta_kbm() {
+                return PadState::default();
+            }
+            if !active {
                 self.disarm_mouse(foreground_window(), "stand-in inactive");
                 return PadState::default();
             }
@@ -2137,15 +2131,6 @@ mod tests {
             fine_x > 0.0,
             "1px low-sens motion should stay non-zero, got {fine_x}"
         );
-
-        // Strict boolean env parsing rejects "false", "0", " 0 ", and "".
-        assert!(parse_env_flag("1"));
-        assert!(parse_env_flag(" true "));
-        assert!(parse_env_flag("YES"));
-        assert!(!parse_env_flag("0"));
-        assert!(!parse_env_flag(" 0 "));
-        assert!(!parse_env_flag("false"));
-        assert!(!parse_env_flag(""));
 
         // Dragging a held button from outside (chrome / another app) into the
         // client area must not fire triggers until released and pressed fresh.
