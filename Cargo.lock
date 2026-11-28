@@ -299,6 +299,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
+ "leonida-core",
  "leonida-formats",
  "leonida-pipeline",
  "leonida-shader",
@@ -313,6 +314,7 @@ dependencies = [
 name = "leonida-hle"
 version = "0.1.0"
 dependencies = [
+ "leonida-core",
  "leonida-formats",
  "leonida-gpu",
  "leonida-loader",

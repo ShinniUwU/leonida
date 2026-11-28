@@ -8,6 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+leonida-core.workspace = true
 leonida-gpu.workspace = true
 leonida-loader.workspace = true
 leonida-pe.workspace = true

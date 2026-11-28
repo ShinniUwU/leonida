@@ -12,6 +12,7 @@ blake3.workspace = true
 zlib-rs.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
+leonida-core.workspace = true
 leonida-formats.workspace = true
 leonida-pipeline.workspace = true
 leonida-shader = { workspace = true, features = ["host"] }
