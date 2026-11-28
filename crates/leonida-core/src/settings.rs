@@ -11,7 +11,8 @@
 //! on in the game and closes it finds them on at the next start, whichever way
 //! the game was started.
 //!
-//! Only switches of [`crate::switches::SWITCHES`] are taken from the file. A
+//! Only switches of [`crate::switches::SWITCHES`] are taken from the file, and
+//! a switch read at start only with one of its listed values. A
 //! file that cannot be read as one is left out with a line saying why, never
 //! an error: a damaged file must not stop the game. `LEONIDA_SAVED_SETTINGS=0`
 //! (or `LEONIDA_GRAPHICS_OFF=1`) leaves the file out, as an unattended
@@ -66,10 +67,19 @@ pub fn parse(text: &str) -> Result<(Environment, Vec<String>)> {
     let mut switches = Environment::new();
     let mut notes = Vec::new();
     for (name, value) in file.switches {
-        if crate::switches::find(&name).is_none() {
+        let Some(switch) = crate::switches::find(&name) else {
             notes.push(format!(
                 "{name} is not a switch the settings file may set: left out"
             ));
+            continue;
+        };
+        // A restart switch's reader may refuse a value it does not know and stop the start
+        // (LEONIDA_DLSS does), which the F1 menu could not undo. Empty leaves it to profiles.
+        if !switch.live
+            && !value.trim().is_empty()
+            && !switch.values.iter().any(|c| c.value == value)
+        {
+            notes.push(format!("{name}={value} is not one of its values: left out"));
         } else if value.contains('\0') {
             notes.push(format!("{name} contains a NUL character: left out"));
         } else {
@@ -295,6 +305,19 @@ mod tests {
         assert_eq!(notes.len(), 2, "{notes:?}");
         assert!(notes.iter().any(|n| n.starts_with("LEONIDA_CACHE_DIR")));
         assert_eq!(parse(r#"{"version":1}"#).unwrap().0, Environment::new());
+    }
+
+    #[test]
+    fn a_restart_switch_keeps_only_its_listed_values() {
+        let text = r#"{"version":1,"switches":{"LEONIDA_DLSS":"on",
+            "LEONIDA_DLSS_PRESET":"","LEONIDA_MOUSE_SENS":"1.5"}}"#;
+        let (switches, notes) = parse(text).unwrap();
+        assert_eq!(
+            switches,
+            env(&[("LEONIDA_DLSS_PRESET", ""), ("LEONIDA_MOUSE_SENS", "1.5")])
+        );
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].starts_with("LEONIDA_DLSS=on"));
     }
 
     #[test]
