@@ -11,6 +11,8 @@
 //! A change applies at once and goes into the shared settings file after
 //! 1.5 quiet seconds, and when the menu closes at the latest. Switches that
 //! need a restart are not here: the last row says they are in the launcher.
+//! PICTURE's DLSS rows (model, sharpness) act only while DLSS runs; without
+//! it their help says to turn DLSS on in the launcher.
 //!
 //! Keys and clicks come from `leonida_hle`'s input poll ([`input`],
 //! [`click`]), which also keeps them from the game while the menu is open
@@ -163,6 +165,21 @@ fn step(nav: &mut Nav, vk: u8, rows: impl Fn(usize) -> usize) -> Do {
         key::RIGHT | b'D' if n > 0 => Do::Change(How::Step(1)),
         key::ENTER if n > 0 => Do::Change(How::Cycle),
         _ => Do::Nothing,
+    }
+}
+
+/// Rows that change what DLSS Super Resolution does, so nothing without it.
+/// Turning DLSS on and its mode (the render size the title fixes at start)
+/// stay in the launcher.
+const DLSS_ROWS: [&str; 2] = ["LEONIDA_DLSS_PRESET", "LEONIDA_DLSS_SHARPNESS"];
+const DLSS_OFF: &str = "DLSS is not running: turn it on in the launcher and start again.";
+
+/// The help line of a row; `dlss`, whether DLSS runs.
+fn help(s: &Switch, dlss: bool) -> String {
+    if !dlss && DLSS_ROWS.contains(&s.name) {
+        format!("{} {DLSS_OFF}", s.help)
+    } else {
+        s.help.to_owned()
     }
 }
 
@@ -471,8 +488,10 @@ pub(crate) fn picture(frame: (u32, u32)) -> Option<(u32, u32, Picture)> {
     let room = (0..TABS.len()).map(|t| lines(t).len()).max().unwrap_or(0);
     let rows = rows(TABS[state.nav.tab]);
     state.nav.row = state.nav.row.min(rows.len().saturating_sub(1));
-    let help = rows.get(state.nav.row).map_or("", |s| s.help);
-    let (picture, hits) = layout(&state.nav, &lines(state.nav.tab), room, help, frame)?;
+    let help = rows
+        .get(state.nav.row)
+        .map_or(String::new(), |s| help(s, crate::streamline::dlss_running()));
+    let (picture, hits) = layout(&state.nav, &lines(state.nav.tab), room, &help, frame)?;
     let at = hits.at;
     state.hits = Some(hits);
     Some((at.0, at.1, picture))
@@ -612,14 +631,26 @@ mod tests {
             ]
         );
         assert_eq!(names(Group::FrameGeneration), ["LEONIDA_FRAMEGEN_X"]);
-        assert!(names(Group::Picture).is_empty());
+        assert_eq!(names(Group::Picture), DLSS_ROWS);
         assert_eq!(names(Group::Controls).len(), 4);
         assert!(TABS.iter().all(|&g| rows(g).iter().all(|s| s.live)));
-        // Every live switch's help fits the help lines.
-        for s in switches::SWITCHES.iter().filter(|s| s.live) {
-            let lines = canvas::wrap(s.help, (COLUMNS - 2) as usize).len();
-            assert!(lines <= HELP_LINES as usize, "{}", s.name);
+        // Turning DLSS on and its mode need a restart: never in the menu.
+        for name in ["LEONIDA_DLSS", "LEONIDA_DLSS_MODE"] {
+            assert!(TABS.iter().all(|&g| rows(g).iter().all(|s| s.name != name)));
         }
+        // Every live switch's help fits the help lines, with DLSS or without.
+        for s in switches::SWITCHES.iter().filter(|s| s.live) {
+            for dlss in [true, false] {
+                let lines = canvas::wrap(&help(s, dlss), (COLUMNS - 2) as usize).len();
+                assert!(lines <= HELP_LINES as usize, "{}", s.name);
+            }
+        }
+        // Without DLSS its rows say where to turn it on; the others do not change.
+        let model = find("LEONIDA_DLSS_PRESET");
+        assert!(help(model, false).ends_with(DLSS_OFF));
+        assert_eq!(help(model, true), model.help);
+        let sens = find("LEONIDA_MOUSE_SENS");
+        assert_eq!(help(sens, false), sens.help);
         // The last row of every tab sends restart settings to the launcher.
         for tab in 0..TABS.len() {
             assert_eq!(lines(tab).last(), Some(&Line::Note(LAUNCHER.to_owned())));
@@ -680,6 +711,14 @@ mod tests {
         let cap = find("LEONIDA_FRAME_INTERVAL_US");
         assert_eq!(shown(cap, 0.0).0, "GAME'S OWN");
         assert_eq!(changed(cap, 0.0, How::Step(1)), "33333");
+        let model = find("LEONIDA_DLSS_PRESET");
+        assert_eq!(shown(model, 0.0).0, "DEFAULT");
+        assert_eq!(shown(model, 11.0).0, "K");
+        assert_eq!(changed(model, 6.0, How::Step(1)), "10", "F, then J");
+        assert_eq!(changed(model, 13.0, How::Cycle), "0");
+        let sharpness = find("LEONIDA_DLSS_SHARPNESS");
+        assert_eq!(shown(sharpness, 0.0).0, "OFF");
+        assert_eq!(changed(sharpness, 0.0, How::Step(1)), "0.25");
     }
 
     fn sample() -> Vec<Line> {

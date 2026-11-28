@@ -80,18 +80,44 @@ impl Mode {
     }
 }
 
-/// `LEONIDA_DLSS_PRESET`: the DLSS model for every mode (`sl::DLSSPreset`).
+/// The DLSS models a player may pick, by name and `sl::DLSSPreset`.
+const PRESETS: [(&str, u32); 7] =
+    [("default", 0), ("e", 5), ("f", 6), ("j", 10), ("k", 11), ("l", 12), ("m", 13)];
+
+/// `LEONIDA_DLSS_PRESET`: the DLSS model for every mode (`sl::DLSSPreset`),
+/// by its letter or its number (as the F1 menu and the settings file write
+/// it).
 pub fn preset(name: &str) -> Option<u32> {
-    Some(match name.trim().to_ascii_lowercase().as_str() {
-        "" | "default" => 0,
-        "e" => 5,
-        "f" => 6,
-        "j" => 10,
-        "k" => 11,
-        "l" => 12,
-        "m" => 13,
-        _ => return None,
-    })
+    let name = name.trim().to_ascii_lowercase();
+    if name.is_empty() {
+        return Some(0);
+    }
+    PRESETS.iter().find(|&&(n, v)| n == name || v.to_string() == name).map(|&(_, v)| v)
+}
+
+/// What a player may change while DLSS runs (the F1 menu's PICTURE tab), passed
+/// to Streamline's options at each upscaling.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tuning {
+    pub preset: u32,
+    pub sharpness: f32,
+}
+
+impl Tuning {
+    /// From the live values of `LEONIDA_DLSS_PRESET` and
+    /// `LEONIDA_DLSS_SHARPNESS`: a model not listed keeps `start` (the one
+    /// read at start), and the sharpness is held to 0..1.
+    pub fn from_values(preset: f64, sharpness: f64, start: u32) -> Self {
+        let listed = PRESETS.iter().map(|&(_, v)| v).find(|&v| f64::from(v) == preset);
+        Tuning { preset: listed.unwrap_or(start), sharpness: sharpness.clamp(0.0, 1.0) as f32 }
+    }
+}
+
+/// Notes `now` in `last`; whether it differs from what was there.
+pub fn changed<T: PartialEq>(last: &mut Option<T>, now: T) -> bool {
+    let changed = last.as_ref() != Some(&now);
+    *last = Some(now);
+    changed
 }
 
 /// `LEONIDA_DLSS`: whether DLSS is on, and at which mode where the value
@@ -426,7 +452,41 @@ mod tests {
         assert_eq!(preset("K"), Some(11));
         assert_eq!(preset("default"), Some(0));
         assert_eq!(preset("a"), None);
+        assert_eq!(preset(""), Some(0));
+        assert_eq!(preset(" 11 "), Some(11));
+        assert_eq!(preset("0"), Some(0));
+        assert_eq!(preset("7"), None, "not a model the menu lists");
         assert_eq!(sl_mode_name(abi::DLSS_DLAA), "DLAA");
+    }
+
+    #[test]
+    fn live_tuning_keeps_listed_models_and_holds_sharpness() {
+        // The switches' defaults give what DLSS had before they were live.
+        assert_eq!(Tuning::from_values(0.0, 0.0, 0), Tuning { preset: 0, sharpness: 0.0 });
+        assert_eq!(Tuning::from_values(11.0, 0.5, 0), Tuning { preset: 11, sharpness: 0.5 });
+        // A model not listed (set by hand) keeps the one of the start.
+        assert_eq!(Tuning::from_values(7.0, 0.0, 12).preset, 12);
+        assert_eq!(Tuning::from_values(11.5, 0.0, 12).preset, 12);
+        assert_eq!(Tuning::from_values(0.0, 3.0, 0).sharpness, 1.0);
+        assert_eq!(Tuning::from_values(0.0, -1.0, 0).sharpness, 0.0);
+        // Every listed model maps to itself.
+        for (name, v) in PRESETS {
+            assert_eq!(preset(name), Some(v));
+            assert_eq!(Tuning::from_values(f64::from(v), 0.0, 99).preset, v);
+        }
+    }
+
+    #[test]
+    fn a_change_is_seen_once() {
+        let mut last = None;
+        let tuned = |preset| (abi::DLSS_MAX_QUALITY, Tuning { preset, sharpness: 0.0 });
+        assert!(changed(&mut last, tuned(0)), "the first time");
+        assert!(!changed(&mut last, tuned(0)));
+        assert!(changed(&mut last, tuned(11)), "the model changed");
+        assert!(!changed(&mut last, tuned(11)));
+        let sharper = (abi::DLSS_MAX_QUALITY, Tuning { preset: 11, sharpness: 0.25 });
+        assert!(changed(&mut last, sharper));
+        assert_eq!(last, Some(sharper));
     }
 
     #[test]

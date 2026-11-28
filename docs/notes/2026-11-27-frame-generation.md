@@ -321,6 +321,8 @@ first read. The live ones:
 | `LEONIDA_PANEL` | PERFORMANCE PANEL (also `F3`) | off | `leonida-gpu/src/panel.rs`, every present |
 | `LEONIDA_FRAME_INTERVAL_US` | FRAME-RATE CAP | 0, the game's own | `leonida-gpu/src/frame.rs`, every frame wait |
 | `LEONIDA_FRAMEGEN_X` | FRAME GENERATION AMOUNT | 2 | `leonida-gpu/src/streamline.rs`, every present |
+| `LEONIDA_DLSS_PRESET` | DLSS MODEL (PICTURE) | 0, NVIDIA's choice | `leonida-gpu/src/streamline.rs` `tuning`, every DLSS upscaling |
+| `LEONIDA_DLSS_SHARPNESS` | DLSS SHARPNESS (PICTURE) | 0 | the same |
 | `LEONIDA_KBM_GTA` | GTA V KEYS AND MOUSE | off | `leonida-hle/src/modules/gameinput.rs`, every poll |
 | `LEONIDA_MOUSE_SENS` | MOUSE SENSITIVITY | 1.0 | the same |
 | `LEONIDA_MOUSE_INVERT_Y` | INVERT MOUSE Y | off | the same |
@@ -331,6 +333,15 @@ includes `LEONIDA_MENU` (on; 0 leaves `F1` and `F3` to the game). On the swap th
 live switches only; its last row says the rest is in the launcher. `LEONIDA_FRAMEGEN_X` changes
 the amount (OFF pauses it) only for frame generation that started with the game. Starting frame
 generation, or choosing DLSS or FSR 3, needs a restart.
+
+The DLSS model and sharpness change only what Streamline is given at each DLSS upscaling, so
+they act only while DLSS runs; without it the rows stay, and their help says to turn DLSS on in
+the launcher. `LEONIDA_DLSS` and the DLSS mode stay restart switches: the mode sets the render
+size the title fixes at start. The model's values are `sl::DLSSPreset` numbers (`0` DEFAULT,
+`5` E, `6` F, `10` to `13` J to M); a live switch's value read at start may also be one of its
+labels, so `LEONIDA_DLSS_PRESET=k` from before still picks K. What was not checked (whether
+Streamline makes its DLSS feature again for a new model, and whether the DLSS DLL still uses
+the sharpness) is in [the DLSS note](2026-11-27-dlss-super-resolution.md#changing-the-model-and-sharpness-while-the-game-runs).
 
 `LEONIDA_FRAME_INTERVAL_US` takes the place of the interval the title asks for (1,000 to
 1,000,000 microseconds), after VIctory-NVIDIA 2f0fbe1. A change restarts the frame clock from
@@ -364,7 +375,7 @@ the title ends, whichever comes first.
 The menu is drawn in Leonida's look: a dark panel, paper text, flamingo for the frame and the
 selected row, neon for the selected tab, teal for ON, amber for notes, and upper-case labels in
 a 5 by 7 dot font of our own. There are four tabs: DISPLAY, FRAME GENERATION (with the type that
-runs, shown but not changed), PICTURE (nothing live yet) and CONTROLS. Each row shows its value,
+runs, shown but not changed), PICTURE (the DLSS model and sharpness) and CONTROLS. Each row shows its value,
 and the bottom line is the selected switch's help. The last row says that more settings, which
 need a restart, are in the launcher. `Q` / `E` or a click changes tab. Up / Down or `W` / `S`
 move. Left / Right or `A` / `D` change the value (stopping at the ends). `Enter` or a click

@@ -134,6 +134,29 @@ const LIST: &[Switch] = &[
         default: "2",
         live: true,
     },
+    // Read at each DLSS upscaling and passed to Streamline's options of that
+    // frame (leonida-gpu streamline.rs `tuning`). The values are the numbers
+    // of `sl::DLSSPreset`; the letters still work at start (see `value_of`).
+    Switch {
+        name: "LEONIDA_DLSS_PRESET",
+        label: "DLSS MODEL",
+        help: "Which DLSS model upscales. DEFAULT is NVIDIA's choice for the mode.",
+        group: Group::Picture,
+        values: &[c("0", "DEFAULT"), c("5", "E"), c("6", "F"), c("10", "J"), c("11", "K"),
+                  c("12", "L"), c("13", "M")],
+        default: "0",
+        live: true,
+    },
+    Switch {
+        name: "LEONIDA_DLSS_SHARPNESS",
+        label: "DLSS SHARPNESS",
+        help: "Sharpening DLSS adds, from 0 (none) to 1. Newer DLSS files may ignore it.",
+        group: Group::Picture,
+        values: &[c("0", "OFF"), c("0.25", "0.25"), c("0.5", "0.5"), c("0.75", "0.75"),
+                  c("1", "1.0")],
+        default: "0",
+        live: true,
+    },
     Switch {
         name: "LEONIDA_KBM_GTA",
         label: "GTA V KEYS AND MOUSE",
@@ -193,16 +216,6 @@ const LIST: &[Switch] = &[
         values: &[c("off", "OFF"), c("quality", "QUALITY"), c("balanced", "BALANCED"),
                   c("performance", "PERFORMANCE"), c("dlaa", "DLAA (NATIVE)")],
         default: "off",
-        live: false,
-    },
-    Switch {
-        name: "LEONIDA_DLSS_PRESET",
-        label: "DLSS MODEL",
-        help: "Which DLSS model upscales. The default is NVIDIA's choice.",
-        group: Group::Upscaling,
-        values: &[c("default", "DEFAULT"), c("e", "E"), c("f", "F"), c("j", "J"), c("k", "K"),
-                  c("l", "L"), c("m", "M")],
-        default: "default",
         live: false,
     },
     Switch {
@@ -426,9 +439,22 @@ pub fn number(value: &str) -> Option<f64> {
     value.parse::<f64>().ok().filter(|v| v.is_finite())
 }
 
+/// `text` as a value of `s`: a [`number`], else the value whose label it is,
+/// case ignored. So `LEONIDA_DLSS_PRESET=k`, written before the switch was
+/// live, still picks the model K.
+fn value_of(s: &Switch, text: &str) -> Option<f64> {
+    number(text).or_else(|| {
+        let text = text.trim();
+        s.values
+            .iter()
+            .find(|c| c.label.eq_ignore_ascii_case(text))
+            .and_then(|c| number(c.value))
+    })
+}
+
 /// A live switch's value now: as [`set`] last made it, else the environment's
-/// at the first read, else the switch's default; 0 for a name not in the list
-/// or a value that is no number.
+/// at the first read (a number or a value's label), else the switch's default;
+/// 0 for a name not in the list or a value that is neither.
 pub fn live_number(name: &str) -> f64 {
     let Some(i) = index(name) else {
         return 0.0;
@@ -437,7 +463,9 @@ pub fn live_number(name: &str) -> f64 {
     if bits != UNREAD {
         return f64::from_bits(bits);
     }
-    let start = std::env::var(name).ok().as_deref().and_then(number);
+    let start = std::env::var(name)
+        .ok()
+        .and_then(|v| value_of(&LIST[i], &v));
     let value = start.or_else(|| number(LIST[i].default)).unwrap_or(0.0);
     // A `set` between the load and here wins.
     let _ = LIVE[i].compare_exchange(
@@ -660,6 +688,8 @@ mod tests {
                 "LEONIDA_PANEL",
                 "LEONIDA_FRAME_INTERVAL_US",
                 "LEONIDA_FRAMEGEN_X",
+                "LEONIDA_DLSS_PRESET",
+                "LEONIDA_DLSS_SHARPNESS",
                 "LEONIDA_KBM_GTA",
                 "LEONIDA_MOUSE_SENS",
                 "LEONIDA_MOUSE_INVERT_Y",
@@ -680,6 +710,22 @@ mod tests {
         assert_eq!(number("fast"), None);
         assert_eq!(number("NaN"), None);
         assert_eq!(number("inf"), None);
+    }
+
+    #[test]
+    fn a_live_value_may_be_given_by_its_label() {
+        let preset = find("LEONIDA_DLSS_PRESET").unwrap();
+        assert_eq!(value_of(preset, "k"), Some(11.0));
+        assert_eq!(value_of(preset, " M "), Some(13.0));
+        assert_eq!(value_of(preset, "default"), Some(0.0));
+        assert_eq!(value_of(preset, "11"), Some(11.0));
+        assert_eq!(value_of(preset, ""), None, "empty: the default");
+        assert_eq!(value_of(preset, "x"), None);
+        assert_eq!((preset.default, preset.group), ("0", Group::Picture));
+        let sharpness = find("LEONIDA_DLSS_SHARPNESS").unwrap();
+        assert_eq!(value_of(sharpness, "0.5"), Some(0.5));
+        assert_eq!(value_of(sharpness, "off"), Some(0.0));
+        assert_eq!(sharpness.default, "0");
     }
 
     #[test]

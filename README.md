@@ -436,8 +436,9 @@ MOUSE SENSITIVITY and INVERT MOUSE Y are in the same tab. From trustno1-coder/VI
 `LEONIDA_MOUSE_CAPTURE=1`, `LEONIDA_MOUSE_SENS` and `LEONIDA_MOUSE_INVERT_Y=1`.
 
 `F1` opens the settings menu while the game runs. It shows only what applies at once: Display (fps
-on screen, the performance panel, a frame-rate cap), Frame generation (its amount), Picture and
-Controls (the GTA V keys, mouse speed, invert Y, mouse capture).
+on screen, the performance panel, a frame-rate cap), Frame generation (its amount), Picture (the
+DLSS model and sharpness, while DLSS runs) and Controls (the GTA V keys, mouse speed, invert Y,
+mouse capture). Turning DLSS on and its mode need a restart and are in the launcher.
 `Q` / `E` change tab, the arrows or `W` / `S` move, the arrows or `A` / `D` change a value, `Enter` or a click moves
 it on, `Esc` or `F1` closes. While it is open the game gets no keyboard or mouse. A change applies at once and is
 saved to `%LOCALAPPDATA%\leonida\settings\switches.json`, which the next start reads (a variable you set by hand

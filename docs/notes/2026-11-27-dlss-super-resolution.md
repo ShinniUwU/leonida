@@ -25,7 +25,10 @@ nothing changes: no image patch, no FidelityFX interposer and no NVIDIA file is 
 
 These switches are only for tuning, and all have defaults:
 
-- `LEONIDA_DLSS_PRESET`: `default`, `e`, `f`, `j`, `k`, `l` or `m`, the DLSS model.
+- `LEONIDA_DLSS_PRESET`: `default`, `e`, `f`, `j`, `k`, `l` or `m`, the DLSS model, or its
+  `sl::DLSSPreset` number (`0`, `5`, `6`, `10` to `13`), as the F1 menu writes it. Live.
+- `LEONIDA_DLSS_SHARPNESS`: `0` (the default, as before) to `1`, the sharpening DLSS adds.
+  Live.
 - `LEONIDA_STREAMLINE_DIR`: a folder of the NVIDIA DLLs other than the default
   `<data dir>\nvidia\streamline-v2.14.16\bin\x64`.
 - `LEONIDA_DLSS_JITTER` and `LEONIDA_DLSS_MV`: `x,y` multipliers for the jitter and the motion
@@ -38,6 +41,32 @@ These switches are only for tuning, and all have defaults:
 whether this card supports DLSS, in the `LEONIDA_DLSS` mode (`quality` if unset). With `--device`
 it also makes the host device and runs DLSS three times on stand-in textures. It needs no game
 files.
+
+### Changing the model and sharpness while the game runs
+
+The model and the sharpness are in the F1 menu's PICTURE tab (DLSS MODEL, DLSS SHARPNESS).
+They are read at each upscaling (`streamline.rs` `tuning`) and given to Streamline in that
+frame's `slDLSSSetOptions`, which our code already calls at every upscaling with the mode and
+sizes, so a change applies from the next frame. Without DLSS running, the rows' help says to
+turn it on in the launcher. Both default to what DLSS did before (NVIDIA's model, sharpness 0),
+and `k` and the other letters, in the settings file or set by hand, still pick their model.
+
+Turning DLSS on and its mode stay in the launcher and need a restart: the mode sets the render
+size, which the title fixes at start.
+
+What was not checked:
+
+- A model is fixed when NGX makes its DLSS feature, so a new one needs the feature made again.
+  That is Streamline's work inside `slEvaluateFeature`, on its and NGX's own objects; nothing
+  the title or our device made is made again, and the first DLSS frame of a run makes the
+  feature in the same place of the title's list. Whether Streamline 2.14.16 makes it again for
+  a new model, or keeps the old one until the next start, was not checked: its source and
+  headers are not on this PC, and no game ran. A tester can see it in Streamline's own log
+  (`LEONIDA_STREAMLINE_LOG`). A hitch or a moment of extra memory when it does is a guess,
+  not measured.
+- NVIDIA's DLSS guide said DLSS's own sharpening was deprecated from DLSS 2.5.1 (from memory,
+  not checked here), so the `nvngx_dlss.dll` that comes with Streamline 2.14.16 may ignore the
+  sharpness. VIctory-NVIDIA `6395727` had it live, through NGX directly.
 
 ## How it works
 

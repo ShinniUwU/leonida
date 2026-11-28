@@ -310,11 +310,11 @@ mod tests {
     #[test]
     fn a_restart_switch_keeps_only_its_listed_values() {
         let text = r#"{"version":1,"switches":{"LEONIDA_DLSS":"on",
-            "LEONIDA_DLSS_PRESET":"","LEONIDA_MOUSE_SENS":"1.5"}}"#;
+            "LEONIDA_FRAMEGEN_HUDLESS":"","LEONIDA_MOUSE_SENS":"1.5"}}"#;
         let (switches, notes) = parse(text).unwrap();
         assert_eq!(
             switches,
-            env(&[("LEONIDA_DLSS_PRESET", ""), ("LEONIDA_MOUSE_SENS", "1.5")])
+            env(&[("LEONIDA_FRAMEGEN_HUDLESS", ""), ("LEONIDA_MOUSE_SENS", "1.5")])
         );
         assert_eq!(notes.len(), 1, "{notes:?}");
         assert!(notes[0].starts_with("LEONIDA_DLSS=on"));

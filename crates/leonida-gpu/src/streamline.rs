@@ -10,7 +10,10 @@
 //!   `LEONIDA_DLSS_MODE` (dlaa, quality, balanced, performance,
 //!   ultraperformance) is the render scale the app patches the title's
 //!   renderer to; the DLSS mode follows the sizes the title then passes.
-//!   `LEONIDA_DLSS_PRESET` (default, j, k, l, m) picks the model.
+//!   `LEONIDA_DLSS_PRESET` (default, e, f, j, k, l, m, or the menu's numbers)
+//!   picks the model and `LEONIDA_DLSS_SHARPNESS` (0 to 1, default 0) the
+//!   sharpening; both are live switches, read at each upscaling ([`tuning`]),
+//!   so a change in the F1 menu reaches Streamline's options the next frame.
 //! - `LEONIDA_FRAMEGEN=1`: DLSS Frame Generation (2x) on our present. The
 //!   device's direct queue and the swap chain are made through Streamline's
 //!   proxies; every present tags the depth and motion vectors of the last
@@ -329,8 +332,9 @@ static PRESENT_HOOKED: AtomicBool = AtomicBool::new(false);
 struct Calls {
     /// Optimal render sizes by output size and mode.
     optimal: Vec<([u32; 2], u32, Option<[u32; 2]>)>,
-    /// The mode, sizes and preset the last options named.
-    last: Option<(u32, [u32; 2], [u32; 2])>,
+    /// The mode, render and output sizes, model and sharpness the last options
+    /// named.
+    last: Option<(u32, [u32; 2], [u32; 2], plan::Tuning)>,
     /// Frame generation: on, the frames for each rendered one last asked of it (0 off), and
     /// the frame whose simulation began.
     framegen_on: bool,
@@ -1484,7 +1488,8 @@ fn evaluate(host: &crate::host::HostList, up: &Upscale, id: u64) -> bool {
             output = ?camera.output,
             mode = plan::sl_mode_name(recorded.mode),
             asked = plan.asked.mode.name(),
-            preset = plan.asked.preset,
+            preset = recorded.tuning.preset,
+            sharpness = recorded.tuning.sharpness,
             optimal = ?recorded.optimal,
             hdr = camera.flags & plan::FFX_HIGH_DYNAMIC_RANGE != 0,
             depth_inverted = camera.depth_inverted(),
@@ -1523,8 +1528,9 @@ fn formats(textures: &Textures) -> Vec<i32> {
 struct Recorded {
     mode: u32,
     optimal: Option<[u32; 2]>,
-    /// Another mode or size than the last time.
+    /// Another mode, size, model or sharpness than the last time.
     changed: bool,
+    tuning: plan::Tuning,
     jitter: [f32; 2],
     mvec_scale: [f32; 2],
 }
@@ -1565,7 +1571,9 @@ fn record(list: *mut c_void, textures: &Textures, camera: &plan::Camera, pre_exp
     let optimal_of_mode = |m: u32| sizes.iter().find(|s| s.0 == m).and_then(|s| s.1);
     let mode = plan::pick_mode(camera.render, output, optimal_of_mode)
         .ok_or_else(|| format!("no DLSS mode takes a {:?} render for a {output:?} output", camera.render))?;
-    let mut options = abi::DlssOptions::new(mode, output, plan.asked.preset);
+    let tuning = tuning(plan);
+    let mut options = abi::DlssOptions::new(mode, output, tuning.preset);
+    options.sharpness = tuning.sharpness;
     options.pre_exposure = if pre_exposure > 0.0 { pre_exposure } else { 1.0 };
     options.color_buffers_hdr = abi::boolean(camera.flags & plan::FFX_HIGH_DYNAMIC_RANGE != 0);
     options.use_auto_exposure = abi::boolean(textures[EXPOSURE].is_none());
@@ -1575,8 +1583,7 @@ fn record(list: *mut c_void, textures: &Textures, camera: &plan::Camera, pre_exp
     if code != 0 {
         return Err(format!("slDLSSSetOptions: {} ({code})", abi::result_name(code)));
     }
-    let changed = calls.last != Some((mode, camera.render, output));
-    calls.last = Some((mode, camera.render, output));
+    let changed = plan::changed(&mut calls.last, (mode, camera.render, output, tuning));
     let token = frame_token(sl, id as u32).ok_or("no frame token")?;
     let constants = camera.constants(plan.asked.jitter, plan.asked.mvec);
     // SAFETY: constants for this frame and viewport.
@@ -1612,7 +1619,36 @@ fn record(list: *mut c_void, textures: &Textures, camera: &plan::Camera, pre_exp
     if let Some(began) = began {
         spent(T_UPSCALE, began);
     }
-    Ok(Recorded { mode, optimal: optimal_of_mode(mode), changed, jitter: constants.jitter_offset, mvec_scale: constants.mvec_scale })
+    Ok(Recorded {
+        mode,
+        optimal: optimal_of_mode(mode),
+        changed,
+        tuning,
+        jitter: constants.jitter_offset,
+        mvec_scale: constants.mvec_scale,
+    })
+}
+
+/// The model and sharpness for this upscaling: `LEONIDA_DLSS_PRESET` and
+/// `LEONIDA_DLSS_SHARPNESS`, live switches the F1 menu changes (PICTURE).
+/// Streamline is given them through `slDLSSSetOptions` at every upscaling, as
+/// the mode and sizes, so a change applies from the next one. A model change is
+/// Streamline's and NGX's own work on their own objects inside
+/// `slEvaluateFeature`; nothing the title or our device made is made again.
+fn tuning(plan: &Plan) -> plan::Tuning {
+    use leonida_core::switches::live_number;
+    plan::Tuning::from_values(
+        live_number("LEONIDA_DLSS_PRESET"),
+        live_number("LEONIDA_DLSS_SHARPNESS"),
+        plan.asked.preset,
+    )
+}
+
+/// Whether DLSS Super Resolution takes the title's upscalings in this run (on
+/// at start, Streamline's DLSS ready, not given up): the F1 menu's DLSS rows
+/// change something only then.
+pub(crate) fn dlss_running() -> bool {
+    upscaling() && DLSS_READY.load(Acquire) && !DLSS_GIVEN_UP.load(Relaxed)
 }
 
 /// The title's FidelityFX upscaler `context` is destroyed: what DLSS made
