@@ -72,7 +72,8 @@ pub(crate) fn signature(elements: &[SigElement], input: bool) -> Vec<u8> {
     // Validator 1.6 writes one name per element in element order, repeats
     // included, except that system values share theirs (it keys names by
     // the semantic's string, which is one static string per system value);
-    // the rows sorted by register (unallocated last), then name offset.
+    // the rows sorted by register (unallocated last), then in element order
+    // within a register, not by column or name offset.
     let mut offsets: Vec<u32> = Vec::new();
     let mut next = 8 + 32 * elements.len() as u32;
     let mut names = Vec::new();
@@ -90,7 +91,7 @@ pub(crate) fn signature(elements: &[SigElement], input: bool) -> Vec<u8> {
         }
     }
     let mut order: Vec<usize> = (0..elements.len()).collect();
-    order.sort_by_key(|&i| (elements[i].row.unwrap_or(u32::MAX), offsets[i]));
+    order.sort_by_key(|&i| elements[i].row.unwrap_or(u32::MAX));
     for i in order {
         let (e, offset) = (&elements[i], offsets[i]);
         let used = e.usage << e.col;
@@ -488,5 +489,34 @@ mod tests {
             .map(|b| format!("{b:02x}"))
             .collect();
         assert_eq!(hex, "900150983cd24fb0d6963f7d28e17f72");
+    }
+
+    fn element(name: &str, kind: u8, interp: u8, row: u32, col: u8, cols: u8) -> SigElement {
+        SigElement {
+            name: name.into(),
+            index: 0,
+            kind,
+            comp: 9,
+            interp,
+            row: Some(row),
+            col,
+            cols,
+            usage: (1 << cols) - 1,
+            half: false,
+        }
+    }
+
+    #[test]
+    fn rows_of_one_register_keep_element_order() {
+        // As the console's containers list them: column 3 before column 0.
+        let els = [
+            element("TEXCOORD", 0, 2, 0, 3, 1),
+            element("TANGENT", 0, 2, 0, 0, 3),
+        ];
+        let part = signature(&els, false);
+        let name_offset =
+            |row: usize| u32::from_le_bytes(part[8 + 32 * row + 4..][..4].try_into().unwrap());
+        assert_eq!(name_offset(0), 8 + 64);
+        assert_eq!(part[8 + 24], 0b1000);
     }
 }
