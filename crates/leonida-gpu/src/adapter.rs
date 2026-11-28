@@ -26,10 +26,14 @@ pub fn describe() -> Result<Description, String> {
         unsafe {
             let adapter: IDXGIAdapter1 = if warp_requested() {
                 crate::host::warp_adapter()?.cast()?
+            } else if let Some((adapter, ..)) = leonida_shader::emit::host::hardware_adapter() {
+                // The card the host makes its device on, so a profile matches
+                // the card that plays and not Windows' first adapter.
+                adapter
             } else {
                 let factory: IDXGIFactory1 = CreateDXGIFactory1()?;
-                // D3D12CreateDevice(None), used by the host, selects this first
-                // adapter, not necessarily the one with the most memory.
+                // With no hardware adapter the host falls back to
+                // D3D12CreateDevice(None), which selects this first adapter.
                 factory.EnumAdapters(0)?.cast()?
             };
             let desc = adapter.GetDesc1()?;
@@ -60,11 +64,17 @@ mod tests {
 
         assert!(std::env::var_os("LEONIDA_D3D12_WARP").is_none());
         let selected = super::describe().expect("a physical adapter is required");
-        // SAFETY: creates an ordinary default D3D12 device and queries its
-        // adapter identity. No title code, pointers, commands or assets are used.
+        // SAFETY: creates an ordinary D3D12 device on the adapter the host picks
+        // and queries its adapter identity. No title code, pointers, commands or
+        // assets are used.
         unsafe {
             let mut device: Option<ID3D12Device> = None;
-            D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device).unwrap();
+            match leonida_shader::emit::host::hardware_adapter() {
+                Some((adapter, ..)) => {
+                    D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device).unwrap()
+                }
+                None => D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device).unwrap(),
+            }
             let device = device.unwrap();
             let factory: IDXGIFactory4 = CreateDXGIFactory1().unwrap();
             let adapter: IDXGIAdapter1 =
